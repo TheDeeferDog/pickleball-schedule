@@ -59,13 +59,12 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names):
         resting = random.sample(range(N), max(0, N - courts*4))
         schedule.append({"resting":resting, "courts":courts_round})
 
-    columns = ["Round"] + [f"Court {i+1} Team A" for i in range(courts)] + [f"Court {i+1} Team B" for i in range(courts)] + ["Resting"]
+    columns = ["Round"] + [f"Court {i+1}" for i in range(courts)] + ["Resting"]
     rows = []
     for r, rd in enumerate(schedule, start=1):
         cells = [r]
         for ((a,b),(c,d)) in rd["courts"]:
-            cells.append(f"{names[a]} & {names[b]}")
-            cells.append(f"{names[c]} & {names[d]}")
+            cells.append(f"{names[a]} & {names[b]} V {names[c]} & {names[d]}")
         cells.append(", ".join(names[i] for i in rd["resting"]))
         rows.append(cells)
     return columns, rows
@@ -99,4 +98,14 @@ if run:
 
     df = pd.DataFrame(rows, columns=columns)
     st.subheader("Schedule")
+    # Center-align cells/headers and slightly tighten padding
+    st.markdown(
+        """
+        <style>
+        [data-testid="stDataFrame"] th, [data-testid="stDataFrame"] td { text-align: center !important; }
+        [data-testid="stDataFrame"] th, [data-testid="stDataFrame"] td { padding: 6px 8px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.dataframe(df, use_container_width=True, hide_index=True)
