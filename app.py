@@ -425,14 +425,21 @@ def build_print_pdf(df: pd.DataFrame, title: str = "Pickleball Schedule", big: b
 # ------------------------------
 status_box = st.empty()
 
+# ------------------------------
+# Main Panel
+# ------------------------------
+status_box = st.empty()
+
 if run:
     names = parse_player_names(players, names_text)
     fixed_pairs = None
     if use_fixed:
         fixed_pairs = parse_fixed_pairs(players, names, fixed_pairs_text)
 
-    # Try requested cap; if impossible, escalate to 2 and warn
     result = None
+    effective_cap = cap_requested
+
+    # Try requested cap; if impossible, escalate to 2 and warn (keeping all other rules)
     for cap in [cap_requested, 2]:
         try:
             with st.spinner(f"Building schedule (cap={cap})…"):
@@ -450,11 +457,12 @@ if run:
             st.error(str(e))
             result = None
             break
+
         if result is not None:
             effective_cap = cap
             break
 
-       if result is None:
+    if result is None:
         st.error("Could not construct a schedule with these settings. Try adjusting players/courts/rounds.")
     else:
         columns, rows, stats, rest_per_round = result
