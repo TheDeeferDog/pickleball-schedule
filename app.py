@@ -415,6 +415,8 @@ if run:
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), file_name="pickleball_schedule.csv", mime="text/csv")
 else:
-    st.info("Set your event details in the sidebar and click **Generate Schedule**. Use ‘Stick with same partner’ to keep fixed teams (requires an even number of resting players each round)."}]}
-
-    st.info("Set your event details in the sidebar and click **Generate Schedule**.")
+    st.info(
+        "Set your event details in the sidebar and click **Generate Schedule**. "
+        "Use 'Stick with same partner' to keep fixed teams "
+        "(requires an even number of resting players each round)."
+    )
