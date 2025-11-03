@@ -10,7 +10,7 @@ from io import BytesIO
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 
 # ------------------------------
 # UI CONFIG
@@ -369,6 +369,11 @@ with st.sidebar:
 # ------------------------------
 
 def build_print_pdf(df: pd.DataFrame, title: str = "Pickleball Schedule", big: bool = True) -> bytes:
+    """Render the schedule to a Letter landscape PDF with large font.
+    If there are many court columns (e.g., 6 courts), automatically split
+    across multiple pages so each page shows at most 3 courts + Resting
+    with large, legible text.
+    """
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -382,48 +387,78 @@ def build_print_pdf(df: pd.DataFrame, title: str = "Pickleball Schedule", big: b
 
     styles = getSampleStyleSheet()
     h_style = styles["Heading1"].clone("H1")
-    h_style.fontSize = 20 if big else 16
-    h_style.leading = h_style.fontSize + 2
+    h_style.fontSize = 22 if big else 18
+    h_style.leading = h_style.fontSize + 4
 
-    story.append(Paragraph(title, h_style))
-    story.append(Spacer(1, 8))
+    cell_style = styles["BodyText"].clone("Cell")
+    cell_style.fontName = 'Helvetica'
+    cell_style.fontSize = 16 if big else 13
+    cell_style.leading = cell_style.fontSize + 4
+    cell_style.alignment = 1  # TA_CENTER
 
-    data = [list(df.columns)] + df.values.tolist()
-    page_width, _ = landscape(letter)
-    avail_width = page_width - 48
-    col_count = len(df.columns)
-    base = avail_width / col_count
-    col_widths = [base for _ in range(col_count)]
-    if col_count >= 2:
-        col_widths[-1] = base * 1.6
-        reduce_each = (col_widths[-1] - base) / (col_count - 1)
-        for i in range(col_count - 1):
-            col_widths[i] -= reduce_each
+    header_size = 17 if big else 14
 
-    tbl = Table(data, colWidths=col_widths, repeatRows=1)
-    body_size = 14 if big else 12
-    header_size = 15 if big else 13
-    tbl.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.black),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), header_size),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
-        ('FONTSIZE', (0,1), (-1,-1), body_size),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
-        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.white]),
-    ]))
+    # Identify columns
+    cols = list(df.columns)
+    round_col = cols[0]
+    rest_col = cols[-1]
+    court_cols = [c for c in cols[1:-1] if c.lower().startswith("court ")]
 
-    story.append(tbl)
+    # Chunk court columns into groups of up to 3 per page for legibility
+    chunk_size = 3
+    chunks = [court_cols[i:i+chunk_size] for i in range(0, len(court_cols), chunk_size)] or [[]]
+
+    for page_idx, group in enumerate(chunks):
+        page_cols = [round_col] + group + [rest_col]
+        # Title per page indicating which courts are shown
+        if group:
+            court_range = f" (Courts {group[0].split()[-1]}–{group[-1].split()[-1]})"
+        else:
+            court_range = ""
+        story.append(Paragraph(title + court_range, h_style))
+        story.append(Spacer(1, 8))
+
+        # Build table data as Paragraphs for better wrapping/centering
+        data = [page_cols]
+        for _, row in df.iterrows():
+            data.append([Paragraph(str(row[c]), cell_style) for c in page_cols])
+
+        # Compute column widths: give Resting more width
+        page_width, _ = landscape(letter)
+        avail_width = page_width - 48
+        col_count = len(page_cols)
+        # Base width with extra for Resting
+        base = avail_width / col_count
+        col_widths = [base for _ in range(col_count)]
+        # Expand Resting and slightly shrink others
+        rest_idx = page_cols.index(rest_col)
+        col_widths[rest_idx] = base * 1.8
+        reduce_each = (col_widths[rest_idx] - base) / (col_count - 1)
+        for i in range(col_count):
+            if i == rest_idx:
+                continue
+            col_widths[i] = max(base - reduce_each, 80)
+
+        tbl = Table(data, colWidths=col_widths, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,0), header_size),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.white]),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ]))
+
+        story.append(tbl)
+        if page_idx < len(chunks) - 1:
+            story.append(PageBreak())
+
     doc.build(story)
     return buffer.getvalue()
-
-# ------------------------------
-# Main Panel
-# ------------------------------
-status_box = st.empty()
 
 # ------------------------------
 # Main Panel
@@ -436,10 +471,8 @@ if run:
     if use_fixed:
         fixed_pairs = parse_fixed_pairs(players, names, fixed_pairs_text)
 
+    # Try requested cap; if impossible, escalate to 2 and warn
     result = None
-    effective_cap = cap_requested
-
-    # Try requested cap; if impossible, escalate to 2 and warn (keeping all other rules)
     for cap in [cap_requested, 2]:
         try:
             with st.spinner(f"Building schedule (cap={cap})…"):
@@ -457,7 +490,6 @@ if run:
             st.error(str(e))
             result = None
             break
-
         if result is not None:
             effective_cap = cap
             break
@@ -467,7 +499,6 @@ if run:
     else:
         columns, rows, stats, rest_per_round = result
         df = pd.DataFrame(rows, columns=columns)
-
         # Center align cells and headers
         st.markdown(
             """
@@ -478,42 +509,19 @@ if run:
             """,
             unsafe_allow_html=True,
         )
-
         if effective_cap > cap_requested:
-            st.warning(
-                f"Max vs Any Opponent = {cap_requested} was too strict; using minimum working cap = {effective_cap} while keeping all other rules."
-            )
+            st.warning(f"Max vs Any Opponent = {cap_requested} was too strict; using minimum working cap = {effective_cap} while keeping all other rules.")
         else:
             st.success("Schedule ready!")
-
         st.subheader("Schedule")
         st.dataframe(df, use_container_width=True, hide_index=True)
-
-        # Download (CSV + Print-friendly PDF)
         csv_bytes = df.to_csv(index=False).encode("utf-8")
-        col_a, col_b = st.columns([1, 1])
-
+        col_a, col_b = st.columns([1,1])
         with col_a:
-            st.download_button(
-                "Download CSV",
-                csv_bytes,
-                file_name="pickleball_schedule.csv",
-                mime="text/csv",
-            )
-
+            st.download_button("Download CSV", csv_bytes, file_name="pickleball_schedule.csv", mime="text/csv")
         with col_b:
             big = st.checkbox("Large print (recommended)", value=True)
-            pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", big=big)
-            st.download_button(
-                "Get Print Version (PDF)",
-                data=pdf_bytes,
-                file_name="pickleball_schedule_print.pdf",
-                mime="application/pdf",
-            )
-
+            pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", big=big)  # auto-splits wide tables across pages for large print
+            st.download_button("Get Print Version (PDF)", data=pdf_bytes, file_name="pickleball_schedule_print.pdf", mime="application/pdf").encode("utf-8"), file_name="pickleball_schedule.csv", mime="text/csv")
 else:
-    st.info(
-        "Set your event details in the sidebar and click **Generate Schedule**. "
-        "Use 'Stick with same partner' to keep fixed teams "
-        "(requires an even number of resting players each round)."
-    )
+    st.info("Set your event details in the sidebar and click **Generate Schedule**. Use ‘Stick with same partner’ to keep fixed teams (requires an even number of resting players each round)."}]}
