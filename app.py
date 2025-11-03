@@ -6,10 +6,13 @@ from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+
+# PDF
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 # ------------------------------------------------------------
 # Streamlit page setup
@@ -70,7 +73,7 @@ def parse_fixed_pairs(N: int, names: List[str], text: str) -> List[Tuple[int, in
 
 
 # ------------------------------------------------------------
-# Schedule generator
+# Schedule generator (kept simple & reliable)
 # ------------------------------------------------------------
 def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fixed_pairs=None, seed=None, time_budget_sec=4.0):
     if seed:
@@ -88,9 +91,6 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
 
     pairs = fixed_pairs or []
     base_order = list(range(N))
-
-    def opp_val(i, j):
-        return opponent_counts[i][j]
 
     def inc_opp(i, j):
         opponent_counts[i][j] += 1
@@ -206,46 +206,125 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
 
 
 # ------------------------------------------------------------
-# PDF Builder (improved readability)
+# PDF Builder — adaptive, large, and multi-page
 # ------------------------------------------------------------
+def _text_col_width(data: List[str], font_name: str, font_size: int, padding: float = 24.0) -> float:
+    """
+    Compute width needed for a column based on the widest text in `data`.
+    Adds padding for breathing room.
+    """
+    widest = 0.0
+    for s in data:
+        s = "" if s is None else str(s)
+        try:
+            w = stringWidth(s, font_name, font_size)
+        except Exception:
+            w = len(s) * (font_size * 0.55)  # fallback rough estimate
+        widest = max(widest, w)
+    return widest + padding
+
+
+def _chunk_courts_by_width(df: pd.DataFrame, font_name: str, font_size: int, page_width: float) -> List[List[str]]:
+    """
+    Split court columns into groups that fit on a page with Round + Resting.
+    Uses measured text width of each column.
+    """
+    cols = list(df.columns)
+    round_col = cols[0]
+    rest_col = cols[-1]
+    court_cols = [c for c in cols[1:-1] if c.lower().startswith("court ")]
+
+    # measure base widths
+    round_width = _text_col_width([round_col] + df[round_col].astype(str).tolist(), font_name, font_size)
+    rest_width  = _text_col_width([rest_col]  + df[rest_col].astype(str).tolist(),  font_name, font_size, padding=40.0)
+
+    # we'll pack courts greedily per page
+    groups = []
+    current = []
+    current_width = round_width + rest_width  # fixed columns per page
+    # leave some extra margin
+    usable = page_width - 48
+
+    for c in court_cols:
+        col_width = _text_col_width([c] + df[c].astype(str).tolist(), font_name, font_size)
+        if current and current_width + col_width > usable:
+            groups.append(current)
+            current = [c]
+            current_width = round_width + rest_width + col_width
+        else:
+            current.append(c)
+            current_width += col_width
+    if current:
+        groups.append(current)
+
+    # Ensure at least 2 courts per page if possible; if names are extremely long
+    # this may still drop to 1 per page — acceptable for legibility.
+    return groups or [[]]
+
+
 def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> bytes:
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28)
+    page = landscape(letter)
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=page,
+        leftMargin=24,
+        rightMargin=24,
+        topMargin=28,
+        bottomMargin=28,
+    )
     story = []
     styles = getSampleStyleSheet()
     h = styles["Heading1"].clone("H")
     h.fontSize = 22 if big else 18
+    h.leading = h.fontSize + 4
+
     story.append(Paragraph(title, h))
     story.append(Spacer(1, 10))
+
+    # Fonts & paddings
+    body_font = "Helvetica"
+    body_size = 16 if big else 13
+    header_size = body_size + 1
+    row_top_pad = 12
+    row_bottom_pad = 12
 
     cols = list(df.columns)
     round_col = cols[0]
     rest_col = cols[-1]
-    courts = [c for c in cols[1:-1] if c.lower().startswith("court ")]
-    chunks = [courts[i:i + 3] for i in range(0, len(courts), 3)] or [[]]
 
-    for idx, group in enumerate(chunks):
+    # Split courts by width so each page fits nicely with big text
+    court_groups = _chunk_courts_by_width(df, body_font, body_size, page_width=page[0])
+
+    for idx, group in enumerate(court_groups):
         page_cols = [round_col] + group + [rest_col]
         data = [page_cols] + df[page_cols].values.tolist()
-
-        col_aligns = ["CENTER"] * len(page_cols)
-        col_aligns[-1] = "LEFT"  # Resting column left-aligned
 
         tbl = Table(data, repeatRows=1)
         tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+
+            # Alignment: center everywhere EXCEPT Resting column which is left
             ('ALIGN', (0, 0), (-2, -1), 'CENTER'),
-            ('ALIGN', (-1, 1), (-1, -1), 'LEFT'),
+            ('ALIGN', (-1, 0), (-1, 0), 'CENTER'),  # Resting header centered
+            ('ALIGN', (-1, 1), (-1, -1), 'LEFT'),    # Resting cells left
+
+            # Vertical centering & comfortable row height
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONT', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 16 if big else 13),
-            ('TOPPADDING', (0, 0), (-1, -1), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+            ('TOPPADDING', (0, 0), (-1, -1), row_top_pad),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), row_bottom_pad),
+
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE',  (0, 0), (-1, 0), header_size),
+            ('FONTNAME',  (0, 1), (-1, -1), body_font),
+            ('FONTSIZE',  (0, 1), (-1, -1), body_size),
+
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
         ]))
         story.append(tbl)
-        if idx < len(chunks) - 1:
+
+        if idx < len(court_groups) - 1:
             story.append(PageBreak())
 
     doc.build(story)
@@ -263,15 +342,19 @@ with st.sidebar:
     with col2:
         courts = st.number_input("Courts", min_value=1, max_value=25, value=3, step=1)
     rounds = st.number_input("Rounds", min_value=1, max_value=50, value=10, step=1)
+
     partner_mode = st.radio("Partner Mode", ["Rotate partners (all different)", "Stick with same partner"])
     fixed_mode = partner_mode.startswith("Stick")
+
     cap = st.selectbox("Max vs Any Opponent", [1, 2], index=1)
     seed_input = st.text_input("Random Seed (optional)")
     seed_val = safe_int(seed_input, None) if seed_input else None
-    names_text = st.text_area("Player Names (optional)", height=120)
+
+    names_text = st.text_area("Player Names (optional, one per line)", height=120)
     pairs_text = ""
     if fixed_mode:
-        pairs_text = st.text_area("Fixed Pairs (optional, e.g. '1 & 2' or 'Alex, Bea')", height=120)
+        pairs_text = st.text_area("Fixed Pairs (optional: '1 & 2' or 'Alex, Bea' per line)", height=120)
+
     run = st.button("Generate Schedule", type="primary")
 
 # ------------------------------------------------------------
@@ -280,7 +363,17 @@ with st.sidebar:
 if run:
     names = parse_player_names(players, names_text)
     fixed_pairs = parse_fixed_pairs(players, names, pairs_text) if fixed_mode else None
-    result = generate_schedule(players, courts, rounds, cap, names, "fixed" if fixed_mode else "rotate", fixed_pairs, seed_val)
+
+    try:
+        result = generate_schedule(
+            players, courts, rounds, cap, names,
+            "fixed" if fixed_mode else "rotate",
+            fixed_pairs, seed_val
+        )
+    except ValueError as e:
+        result = None
+        st.error(str(e))
+
     if not result:
         st.error("Could not generate a valid schedule. Try adjusting numbers or loosening constraints.")
     else:
@@ -288,9 +381,15 @@ if run:
         df = pd.DataFrame(rows, columns=columns)
         st.success("✅ Schedule generated successfully!")
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Exports
         csv_bytes = df.to_csv(index=False).encode("utf-8")
-        pdf_bytes = build_print_pdf(df, big=True)
-        st.download_button("Download CSV", data=csv_bytes, file_name="pickleball_schedule.csv", mime="text/csv")
-        st.download_button("Get Print Version (PDF)", data=pdf_bytes, file_name="pickleball_schedule_print.pdf", mime="application/pdf")
+        pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", big=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button("Download CSV", data=csv_bytes, file_name="pickleball_schedule.csv", mime="text/csv")
+        with c2:
+            st.download_button("Get Print Version (PDF)", data=pdf_bytes, file_name="pickleball_schedule_print.pdf", mime="application/pdf")
 else:
     st.info("Set your event details in the sidebar and click **Generate Schedule**.")
