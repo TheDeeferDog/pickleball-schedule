@@ -474,7 +474,8 @@ if run:
         else:
             st.success("Schedule ready!")
         st.subheader("Schedule")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+       st.dataframe(df, use_container_width=True, hide_index=True)
+        # Download (CSV + Print-friendly PDF)
         csv_bytes = df.to_csv(index=False).encode("utf-8")
         col_a, col_b = st.columns([1,1])
         with col_a:
@@ -482,6 +483,7 @@ if run:
         with col_b:
             big = st.checkbox("Large print (recommended)", value=True)
             pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", big=big)
-            st.download_button("Get Print Version (PDF)", data=pdf_bytes, file_name="pickleball_schedule_print.pdf", mime="application/pdf").encode("utf-8"), file_name="pickleball_schedule.csv", mime="text/csv")
+            st.download_button("Get Print Version (PDF)", data=pdf_bytes, file_name="pickleball_schedule_print.pdf", mime="application/pdf")
+
 else:
     st.info("Set your event details in the sidebar and click **Generate Schedule**. Use ‘Stick with same partner’ to keep fixed teams (requires an even number of resting players each round)."}]}
