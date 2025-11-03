@@ -413,7 +413,7 @@ with st.sidebar:
     cap = st.selectbox("Max vs Any Opponent", [1, 2, 3, 4], index=1)  # default = 2
     pdf_size = st.radio("PDF Font Size", ["Large", "X-Large"], index=0)
 
-    seed_input = st.text_input("Random Seed (optional)")
+    seed_input = st.text_input("Specific Schedule Number", help="Enter a number to reproduce the exact same schedule later. Leave blank for a new random draw each time.")
     seed_val = safe_int(seed_input, None) if seed_input else None
 
     names_text = st.text_area("Player Names (optional, one per line)", height=120)
