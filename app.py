@@ -24,7 +24,7 @@ st.set_page_config(
 )
 
 st.title("🎾 Pickleball Schedule Generator")
-st.caption("Rotate or fixed partners, evenly spaced rests, and minimal repeat opponents — printable and large-font friendly.")
+st.caption("Rotate or fixed partners, evenly spaced rests, and capped repeat opponents — printable and large-font friendly.")
 
 # ------------------------------------------------------------
 # Utility functions
@@ -72,9 +72,12 @@ def parse_fixed_pairs(N: int, names: List[str], text: str) -> List[Tuple[int, in
 
 
 # ------------------------------------------------------------
-# Schedule generator (simple & reliable baseline)
+# Schedule generator (with opponent-cap aware court forming)
 # ------------------------------------------------------------
-def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fixed_pairs=None, seed=None, time_budget_sec=4.0):
+def generate_schedule(
+    N, courts, rounds, max_opp_repeat, names, partner_mode,
+    fixed_pairs=None, seed=None, time_budget_sec=4.0
+):
     if seed:
         random.seed(seed)
 
@@ -126,6 +129,7 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
         return chosen
 
     def pair_players(avail):
+        # Build pairs trying to avoid repeat partners (rotate mode)
         result = []
         avail = avail.copy()
         random.shuffle(avail)
@@ -140,15 +144,32 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
             partner_pairs[a].add(b); partner_pairs[b].add(a)
         return result
 
-    def group_into_courts(pairs):
-        random.shuffle(pairs)
-        courts_round = []
-        for i in range(0, len(pairs), 2):
-            a, b = pairs[i]; c, d = pairs[i + 1]
-            if len({a, b, c, d}) < 4:
-                return None
-            courts_round.append(((a, b), (c, d)))
-        return courts_round
+    def courts_ok_with_cap(courts_round):
+        # Ensure adding this set of courts doesn't exceed max_opp_repeat for any matchup
+        for (a, b), (c, d) in courts_round:
+            for x, y in [(a, c), (a, d), (b, c), (b, d)]:
+                if opponent_counts[x][y] + 1 > max_opp_repeat:
+                    return False
+        return True
+
+    def group_into_courts_with_cap(pairs):
+        # Try many shuffles to find a grouping that respects the opponent cap
+        idxs = list(range(len(pairs)))
+        for _ in range(1500):
+            random.shuffle(idxs)
+            ok = True
+            tmp = []
+            for i in range(0, len(idxs), 2):
+                a, b = pairs[idxs[i]]
+                c, d = pairs[idxs[i+1]]
+                if len({a, b, c, d}) < 4:
+                    ok = False; break
+                tmp.append(((a, b), (c, d)))
+            if not ok:
+                continue
+            if courts_ok_with_cap(tmp[:courts]):
+                return tmp[:courts]
+        return None
 
     start_time = time.time()
     best = None
@@ -170,7 +191,7 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
                 round_pairs = pair_players(avail)
             if not round_pairs or len(round_pairs) < courts * 2:
                 success = False; break
-            courts_round = group_into_courts(round_pairs[: courts * 2])
+            courts_round = group_into_courts_with_cap(round_pairs[: courts * 2])
             if not courts_round:
                 success = False; break
             schedule.append({"resting": resting, "courts": courts_round})
@@ -220,20 +241,18 @@ def _group_cols_across_pages(df: pd.DataFrame, font: str, size: int, page_width:
     cols = list(df.columns)
     round_col = cols[0]
     court_cols = [c for c in cols[1:-1] if c.lower().startswith("court ")]
-    resting_col = cols[-1]  # treat as variable like a court
+    resting_col = cols[-1]
     var_cols = court_cols + [resting_col]
 
-    # Make Round column narrow: measure only header + a few digits; small padding
     round_samples = [round_col] + [str(i) for i in range(1, min(100, len(df) + 1))]
-    round_w = _measure_width(round_samples, font, size, pad=18)  # tight
+    round_w = _measure_width(round_samples, font, size, pad=18)
 
     usable = page_width - (left_margin + right_margin)
 
     groups = []
     cur = []
-    cur_width = round_w  # fixed round column width counted on every page
+    cur_width = round_w
 
-    # Greedy pack variable columns by measured width
     for c in var_cols:
         col_w = _measure_width([c] + df[c].astype(str).tolist(), font, size, pad=30)
         if cur and cur_width + col_w > usable:
@@ -246,7 +265,6 @@ def _group_cols_across_pages(df: pd.DataFrame, font: str, size: int, page_width:
     if cur:
         groups.append(cur)
 
-    # Soft cap at 4 columns per page (names may allow 3–4; long names may reduce to 1–2)
     capped = []
     for g in groups:
         if len(g) <= 4:
@@ -254,15 +272,13 @@ def _group_cols_across_pages(df: pd.DataFrame, font: str, size: int, page_width:
         else:
             for i in range(0, len(g), 4):
                 capped.append(g[i:i+4])
-
-    # Always return at least one group
     return capped or [[]]
 
 
-def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> bytes:
+def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", pdf_size="Large") -> bytes:
     buffer = BytesIO()
     page = landscape(letter)
-    left_margin = right_margin = top_margin = bottom_margin = 36  # comfortable margins
+    left_margin = right_margin = top_margin = bottom_margin = 36
 
     doc = SimpleDocTemplate(
         buffer,
@@ -275,25 +291,30 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> 
 
     styles = getSampleStyleSheet()
     header_style = styles["Heading1"].clone("SchedHeader")
-    header_style.fontSize = 22 if big else 18
+
+    # Font sizing
+    if pdf_size == "X-Large":
+        body_size = 18
+        header_style.fontSize = 24
+    else:
+        body_size = 16
+        header_style.fontSize = 22
     header_style.leading = header_style.fontSize + 6
 
     body_font = "Helvetica"
-    body_size = 16 if big else 13
     body_leading = body_size + 4
 
     cell_center = ParagraphStyle(
         "CellCenter", parent=styles["BodyText"],
         fontName=body_font, fontSize=body_size, leading=body_leading,
-        alignment=1  # center
+        alignment=1
     )
     cell_left = ParagraphStyle(
         "CellLeft", parent=styles["BodyText"],
         fontName=body_font, fontSize=body_size, leading=body_leading,
-        alignment=0  # left
+        alignment=0
     )
 
-    # Row/cell padding
     row_top_pad = 12
     row_bottom_pad = 12
     left_pad = 10
@@ -302,82 +323,64 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> 
     cols = list(df.columns)
     round_col = cols[0]
     resting_col = cols[-1]
-    court_cols = [c for c in cols[1:-1] if c.lower().startswith("court ")]
 
-    # Decide groupings: Round appears on every page; Resting is *variable* (like a court)
     groups = _group_cols_across_pages(df, body_font, body_size, page_width=page[0], margins=(left_margin, right_margin))
 
     for idx, group in enumerate(groups):
-        # Determine which courts/resting are on this page
-        # Build a nice subtitle that reflects which columns are shown
         courts_in_group = [c for c in group if c != resting_col]
         show_resting = resting_col in group
 
         if courts_in_group:
             first_c = courts_in_group[0].split()[-1]
             last_c  = courts_in_group[-1].split()[-1]
-            if first_c == last_c:
-                subtitle = f"{title} — Court {first_c}"
-            else:
-                subtitle = f"{title} — Courts {first_c}–{last_c}"
+            subtitle = f"{title} — Court {first_c}" if first_c == last_c else f"{title} — Courts {first_c}–{last_c}"
         else:
             subtitle = f"{title} — Resting"
 
         story.append(Paragraph(subtitle, header_style))
         story.append(Spacer(1, 10))
 
-        page_cols = [round_col] + group  # Round always first
-        # Build wrapped Paragraph cells
+        page_cols = [round_col] + group
         data = [page_cols]
         for _, row in df.iterrows():
             row_cells = []
-            for j, c in enumerate(page_cols):
+            for c in page_cols:
                 txt = "" if pd.isna(row[c]) else str(row[c])
-                if c == resting_col:  # Resting left
+                if c == resting_col:
                     row_cells.append(Paragraph(txt, cell_left))
-                else:  # Round + Court columns centered
+                else:
                     row_cells.append(Paragraph(txt, cell_center))
             data.append(row_cells)
 
-        # Column widths: Round narrow (measured), others share remaining by measurement bias
+        # Widths: Round narrow measured; others scaled
         round_samples = [round_col] + [str(i) for i in range(1, min(100, len(df) + 1))]
         round_w = _measure_width(round_samples, body_font, body_size, pad=18)
         avail_w = page[0] - (left_margin + right_margin)
-        # Estimate widths for variable columns on this page
-        var_widths = []
-        total_var_w = 0.0
+        var_ws = []
+        total_var = 0.0
         for c in group:
-            pad = 30 if c != resting_col else 36
-            w = _measure_width([c] + df[c].astype(str).tolist(), body_font, body_size, pad=pad)
-            var_widths.append(w)
-            total_var_w += w
-
-        # Scale variable widths to fit remaining space
+            pad_amt = 36 if c == resting_col else 30
+            w = _measure_width([c] + df[c].astype(str).tolist(), body_font, body_size, pad=pad_amt)
+            var_ws.append(w)
+            total_var += w
         remaining = max(avail_w - round_w, 200)
-        if total_var_w > 0:
-            scale = min(1.0, remaining / total_var_w)
-        else:
-            scale = 1.0
-
-        col_widths = [round_w] + [w * scale for w in var_widths]
+        scale = min(1.0, remaining / total_var) if total_var > 0 else 1.0
+        col_widths = [round_w] + [w * scale for w in var_ws]
 
         tbl = Table(data, repeatRows=1, colWidths=col_widths, hAlign="CENTER")
         tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
 
-            # Alignment rules (already applied by Paragraphs, but keep for safety)
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('ALIGN', (-1, 1), (-1, -1), 'LEFT') if show_resting else ('ALIGN', (0,0), (0,0), 'CENTER'),
 
-            # Vertical centering & generous paddings for big text
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('TOPPADDING', (0, 0), (-1, -1), row_top_pad),
             ('BOTTOMPADDING', (0, 0), (-1, -1), row_bottom_pad),
             ('LEFTPADDING', (0, 0), (-1, -1), left_pad),
             ('RIGHTPADDING', (0, 0), (-1, -1), right_pad),
 
-            # Fonts
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE',  (0, 0), (-1, 0), body_size + 1),
         ]))
@@ -407,7 +410,9 @@ with st.sidebar:
     partner_mode = st.radio("Partner Mode", ["Rotate partners (all different)", "Stick with same partner"])
     fixed_mode = partner_mode.startswith("Stick")
 
-    cap = st.selectbox("Max vs Any Opponent", [1, 2], index=1)
+    cap = st.selectbox("Max vs Any Opponent", [1, 2, 3, 4], index=1)  # default = 2
+    pdf_size = st.radio("PDF Font Size", ["Large", "X-Large"], index=0)
+
     seed_input = st.text_input("Random Seed (optional)")
     seed_val = safe_int(seed_input, None) if seed_input else None
 
@@ -445,7 +450,7 @@ if run:
 
         # Exports
         csv_bytes = df.to_csv(index=False).encode("utf-8")
-        pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", big=True)
+        pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", pdf_size=pdf_size)
 
         c1, c2 = st.columns(2)
         with c1:
