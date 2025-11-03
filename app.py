@@ -1,7 +1,7 @@
 import time
 import random
-from collections import defaultdict, Counter
-from typing import List, Tuple
+from collections import Counter
+from typing import List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 st.title("🎾 Pickleball Schedule Generator")
-st.caption("New partners, evenly-spaced rests, and minimal repeat opponents — all in your browser.")
+st.caption("New partners or fixed partners, evenly‑spaced rests (no back‑to‑back), and minimal repeat opponents — all in your browser.")
 
 # ------------------------------
 # Helpers
@@ -32,7 +32,7 @@ def compute_target_rests(N: int, rounds: int, courts: int):
     return target, rest_per_round
 
 
-def safe_int(s: str, default: int | None) -> int | None:
+def safe_int(s: str, default: Optional[int]) -> Optional[int]:
     try:
         return int(s)
     except Exception:
@@ -40,14 +40,53 @@ def safe_int(s: str, default: int | None) -> int | None:
 
 
 def parse_player_names(count: int, text: str) -> List[str]:
+    # Default to 1..N labels (no "Player" prefix) unless provided
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     out = []
     for i in range(count):
         out.append(lines[i] if i < len(lines) else f"{i+1}")
     return out
 
+
+def parse_fixed_pairs(N: int, names: List[str], text: str) -> List[Tuple[int, int]]:
+    """Parse pairs from textarea. Accept formats like '1 & 2' or 'Alex, Bea'.
+    Returns list of (idxA, idxB). If empty, auto‑pair sequentially (0&1, 2&3, ...)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        # Auto-pair sequentially
+        pairs = []
+        for i in range(0, N - (N % 2), 2):
+            pairs.append((i, i + 1))
+        return pairs
+
+    # Build lookup by visible name
+    name_to_idx = {names[i].strip(): i for i in range(N)}
+    used = set()
+    pairs: List[Tuple[int, int]] = []
+    for ln in lines:
+        # split by & or ,
+        parts = [p.strip() for p in ln.replace('&', ',').split(',') if p.strip()]
+        if len(parts) != 2:
+            continue
+        a_s, b_s = parts
+        # try number
+        a = safe_int(a_s, None)
+        b = safe_int(b_s, None)
+        if a is not None and b is not None:
+            a -= 1; b -= 1
+        else:
+            a = name_to_idx.get(a_s)
+            b = name_to_idx.get(b_s)
+        if a is None or b is None or a == b or not (0 <= a < N) or not (0 <= b < N):
+            continue
+        if a in used or b in used:
+            continue
+        used.add(a); used.add(b)
+        pairs.append((a, b))
+    return pairs
+
 # ------------------------------
-# Core generator with constraint checks & fallback cap escalation
+# Core generator with partner modes
 # ------------------------------
 
 def generate_schedule(
@@ -56,8 +95,10 @@ def generate_schedule(
     rounds: int,
     max_opp_repeat: int,
     names: List[str],
+    partner_mode: str,  # 'rotate' or 'fixed'
+    fixed_pairs: Optional[List[Tuple[int, int]]] = None,
     time_budget_sec: float = 4.0,
-    seed: int | None = None,
+    seed: Optional[int] = None,
 ):
     if courts * 4 > N:
         raise ValueError("Courts require more players than available.")
@@ -66,13 +107,20 @@ def generate_schedule(
 
     target_rests, rest_per_round = compute_target_rests(N, rounds, courts)
 
-    # state across attempts
-    partner_pairs = [set() for _ in range(N)]
+    # If fixed partners, we must rest in PAIRS. That requires an even number of rest slots per round.
+    if partner_mode == 'fixed' and (rest_per_round % 2 != 0):
+        raise ValueError(
+            "Fixed partner mode requires an even number of resting players each round. "
+            "Adjust players/courts so N - 4*courts is even, or use Rotate partners."
+        )
+
+    # State for attempts
+    partner_pairs = [set() for _ in range(N)]  # used only in rotate mode
     opponent_counts = [Counter() for _ in range(N)]
     rests_so_far = [0] * N
     last_rest_round = [-99] * N
 
-    schedule: List[dict] = []
+    schedule = []  # list of {resting:[idx], courts:[((a,b),(c,d)), ...]}
 
     def opp_val(i: int, j: int) -> int:
         return opponent_counts[i][j]
@@ -81,26 +129,47 @@ def generate_schedule(
         opponent_counts[i][j] += d
         opponent_counts[j][i] += d
 
-    def choose_resting(rnd: int) -> List[int]:
-        # Score-based selection to meet targets and avoid consecutive rests
+    # ------------- Rest selection -------------
+    def choose_resting_rotate(rnd: int) -> List[int]:
+        # per-player scoring
         scores = []
         for i in range(N):
             if rests_so_far[i] >= target_rests[i]:
                 scores.append((-10**9, i)); continue
             if rnd - last_rest_round[i] == 1:
-                scores.append((-10**6, i)); continue  # block back-to-back
+                scores.append((-10**6, i)); continue
             need = target_rests[i] - rests_so_far[i]
             since = rnd - last_rest_round[i]
-            score = need * 300 + since + random.random()
-            scores.append((score, i))
+            scores.append((need * 300 + since + random.random(), i))
         scores.sort(reverse=True)
         chosen = [i for _, i in scores[:rest_per_round]]
         return chosen
 
-    def pair_players(avail: List[int]) -> List[Tuple[int,int]] | None:
-        # Backtracking to form pairs with no repeat partners
+    def choose_resting_fixed(rnd: int, pair_list: List[Tuple[int, int]]) -> List[int]:
+        # score by PAIRS (both rest together)
+        pairs_scores = []
+        pairs_needed = rest_per_round // 2
+        for a, b in pair_list:
+            # If either has maxed rests, deprioritize; block back-to-back if either rested last round
+            if rests_so_far[a] >= target_rests[a] or rests_so_far[b] >= target_rests[b]:
+                score = -10**9
+            elif rnd - last_rest_round[a] == 1 or rnd - last_rest_round[b] == 1:
+                score = -10**6
+            else:
+                need = (target_rests[a] - rests_so_far[a]) + (target_rests[b] - rests_so_far[b])
+                since = min(rnd - last_rest_round[a], rnd - last_rest_round[b])
+                score = need * 300 + since + random.random()
+            pairs_scores.append((score, (a, b)))
+        pairs_scores.sort(reverse=True)
+        chosen_pairs = [p for _, p in pairs_scores[:pairs_needed]]
+        chosen = [x for pair in chosen_pairs for x in pair]
+        return chosen
+
+    # ------------- Pair & court formation -------------
+    def pair_players_rotate(avail: List[int]) -> Optional[List[Tuple[int, int]]]:
+        # Backtracking to ensure no repeat partners
         order = sorted(avail, key=lambda x: len(partner_pairs[x]))
-        result: List[Tuple[int,int]] = []
+        result: List[Tuple[int, int]] = []
         def bt(lst: List[int]) -> bool:
             if not lst: return True
             p = lst[0]
@@ -108,7 +177,7 @@ def generate_schedule(
                 q = lst[k]
                 if q in partner_pairs[p]:
                     continue
-                result.append((p,q))
+                result.append((p, q))
                 nxt = lst[1:k] + lst[k+1:]
                 if bt(nxt):
                     return True
@@ -117,30 +186,34 @@ def generate_schedule(
         ok = bt(order)
         return result if ok else None
 
-    def court_cost(court: Tuple[Tuple[int,int],Tuple[int,int]]) -> int | float:
-        (a,b), (c,d) = court
-        pairs = [(a,c),(a,d),(b,c),(b,d)]
+    def pairs_for_fixed(avail: List[int], pair_list: List[Tuple[int, int]]) -> Optional[List[Tuple[int, int]]]:
+        # Simply pick the subset of predeclared pairs that are available (entire set should be available if resting chosen by pairs)
+        avail_set = set(avail)
+        pairs = [(a, b) for (a, b) in pair_list if a in avail_set and b in avail_set]
+        # Sanity: length should match
+        return pairs if len(pairs) * 2 == len(avail) else None
+
+    def court_cost(court: Tuple[Tuple[int, int], Tuple[int, int]]) -> float:
+        (a, b), (c, d) = court
         cost = 0
-        for x,y in pairs:
-            oc = opp_val(x,y)
-            if oc >= 2:  # hard cap: never allow 3+
+        for x, y in [(a, c), (a, d), (b, c), (b, d)]:
+            oc = opp_val(x, y)
+            if oc >= 2:  # hard stop at 3+
                 return float('inf')
             if oc == 1:
-                cost += 1  # try to minimize creating more 2s
+                cost += 1
         return cost
 
-    def group_pairs_into_courts(pairs: List[Tuple[int,int]]):
+    def group_pairs_into_courts(pairs: List[Tuple[int, int]]) -> Optional[List[Tuple[Tuple[int, int], Tuple[int, int]]]]:
         idxs = list(range(len(pairs)))
         best = None; best_cost = float('inf')
-        for _ in range(2500):
+        for _ in range(3000):
             random.shuffle(idxs)
             ok = True; cost = 0; courts_round = []
-            used = set()
             for i in range(0, len(idxs), 2):
-                (a,b) = pairs[idxs[i]]; (c,d) = pairs[idxs[i+1]]
-                # redundant safety check: no duplicates
-                if len({a,b,c,d}) < 4: ok = False; break
-                court = ((a,b),(c,d))
+                (a, b) = pairs[idxs[i]]; (c, d) = pairs[idxs[i + 1]]
+                if len({a, b, c, d}) < 4: ok = False; break
+                court = ((a, b), (c, d))
                 cst = court_cost(court)
                 if not (cst < float('inf')):
                     ok = False; break
@@ -150,49 +223,77 @@ def generate_schedule(
                 if best_cost == 0: break
         return best
 
-    def form_courts(avail: List[int]):
-        pairs = pair_players(avail)
+    def form_courts(avail: List[int], pair_list: Optional[List[Tuple[int, int]]] = None):
+        if partner_mode == 'fixed':
+            pairs = pairs_for_fixed(avail, pair_list or [])
+        else:
+            pairs = pair_players_rotate(avail)
         if not pairs:
             return None
         return group_pairs_into_courts(pairs)
 
-    def try_build() -> bool:
-        # reset per attempt
-        for i in range(N):
-            partner_pairs[i].clear(); opponent_counts[i].clear()
-            rests_so_far[i] = 0; last_rest_round[i] = -99
-        schedule.clear()
-        base_order = list(range(N)); random.shuffle(base_order)
-        for r in range(rounds):
-            resting = choose_resting(r)
-            rest_set = set(resting)
-            # All non-resting must be on court — EXACTLY fill courts without slicing errors
-            avail = [i for i in base_order if i not in rest_set]
-            if len(avail) != courts * 4:
-                return False
-            courts_round = form_courts(avail)
-            if not courts_round:
-                return False
-            # apply
-            schedule.append({"resting": resting, "courts": courts_round})
-            for i in resting:
-                rests_so_far[i] += 1; last_rest_round[i] = r
-            for (a,b), (c,d) in courts_round:
-                partner_pairs[a].add(b); partner_pairs[b].add(a)
-                partner_pairs[c].add(d); partner_pairs[d].add(c)
-                for x,y in [(a,c),(a,d),(b,c),(b,d)]:
-                    inc_opp(x,y,1)
-        return True
-
+    # ------------- Attempt loop -------------
     if seed is not None:
         random.seed(seed)
+
+    # If fixed partners, define list
+    declared_pairs: List[Tuple[int, int]] = []
+    if partner_mode == 'fixed':
+        if fixed_pairs:
+            declared_pairs = fixed_pairs
+        else:
+            declared_pairs = [(i, i + 1) for i in range(0, N - (N % 2), 2)]
+        # Validate no overlaps
+        seen = set()
+        for a, b in declared_pairs:
+            if a in seen or b in seen or a == b:
+                raise ValueError("Fixed pairs input has overlapping/invalid players.")
+            seen.add(a); seen.add(b)
+        if len(seen) < N and (N - len(seen)) % 2 != 0:
+            raise ValueError("Unpaired players remain; please complete pairs or reduce player count.")
 
     deadline = time.time() + time_budget_sec
     best_snapshot = None; best_score = float('inf')
 
     while time.time() < deadline:
-        if not try_build():
+        # reset per attempt
+        for i in range(N):
+            partner_pairs[i].clear()
+            opponent_counts[i].clear()
+            rests_so_far[i] = 0
+            last_rest_round[i] = -99
+        schedule.clear()
+
+        base_order = list(range(N))
+        random.shuffle(base_order)
+
+        feasible = True
+        for r in range(rounds):
+            if partner_mode == 'fixed':
+                resting = choose_resting_fixed(r, declared_pairs)
+            else:
+                resting = choose_resting_rotate(r)
+            rest_set = set(resting)
+            avail = [i for i in base_order if i not in rest_set]
+            if len(avail) != courts * 4:
+                feasible = False; break
+            courts_round = form_courts(avail, declared_pairs if partner_mode == 'fixed' else None)
+            if not courts_round:
+                feasible = False; break
+            # apply
+            schedule.append({"resting": resting, "courts": courts_round})
+            for i in resting:
+                rests_so_far[i] += 1; last_rest_round[i] = r
+            for (a, b), (c, d) in courts_round:
+                if partner_mode == 'rotate':
+                    partner_pairs[a].add(b); partner_pairs[b].add(a)
+                    partner_pairs[c].add(d); partner_pairs[d].add(c)
+                for x, y in [(a, c), (a, d), (b, c), (b, d)]:
+                    opponent_counts[x][y] += 1
+                    opponent_counts[y][x] += 1
+        if not feasible:
             continue
+
         # evaluate
         max_opp_by_player = [max(opponent_counts[i].values() or [0]) for i in range(N)]
         violators = sum(1 for m in max_opp_by_player if m > 1)
@@ -200,34 +301,26 @@ def generate_schedule(
         score = violators * 1000 + total_at_2
         if score < best_score:
             best_score = score
-            snap_schedule = []
-            for rd in schedule:
-                snap_schedule.append({
-                    "resting": list(rd["resting"]),
-                    "courts": [((a,b),(c,d)) for (a,b),(c,d) in rd["courts"]],
-                })
-            best_snapshot = (snap_schedule, max_opp_by_player)
+            best_snapshot = ([{ "resting": list(rd["resting"]), "courts": [((a,b),(c,d)) for (a,b),(c,d) in rd["courts"]] } for rd in schedule], max_opp_by_player)
             if max_opp_repeat == 1 and violators == 0:
                 break
 
     if not best_snapshot:
         return None
 
-    # build table columns/rows (each court one column with both teams)
-    schedule_snap, max_opp_by_player = best_snapshot
+    snap, max_opp = best_snapshot
+
+    # Build table (each court one column)
     columns = ["Round", *[f"Court {k+1}" for k in range(courts)], "Resting"]
     rows = []
-    for r, rd in enumerate(schedule_snap, start=1):
+    for r, rd in enumerate(snap, start=1):
         cells = [r]
-        for ((a,b),(c,d)) in rd["courts"]:
+        for ((a, b), (c, d)) in rd["courts"]:
             cells.append(f"{names[a]} & {names[b]} V {names[c]} & {names[d]}")
-        resting_names = ", ".join(names[i] for i in sorted(rd["resting"]))
-        cells.append(resting_names)
+        cells.append(", ".join(names[i] for i in sorted(rd["resting"])))
         rows.append(cells)
 
-    stats = {
-        "oppMax": max_opp_by_player
-    }
+    stats = {"oppMax": max_opp}
     return columns, rows, stats, rest_per_round
 
 # ------------------------------
@@ -243,13 +336,25 @@ with st.sidebar:
 
     rounds = st.number_input("Rounds", min_value=1, max_value=50, value=10, step=1)
 
+    partner_mode = st.radio(
+        "Partner mode",
+        options=["Rotate partners (all different)", "Stick with same partner"],
+        index=0,
+    )
+    use_fixed = partner_mode.startswith("Stick")
+
     cap_requested = st.selectbox("Max vs Any Opponent", options=[1, 2], index=1, help="1 is stricter (harder); 2 is recommended.")
 
     seed_in = st.text_input("Random Seed (optional)")
     seed_val = None if not seed_in.strip() else safe_int(seed_in, None)
 
-    st.markdown("**Player Names (optional)** — one per line; leave blank to auto-name:")
-    names_text = st.text_area("", height=140, placeholder="e.g.\nAlex\nBea\nChris\n…")
+    st.markdown("**Player Names (optional)** — one per line; leave blank to auto-name 1..N.")
+    names_text = st.text_area("", height=120, placeholder="e.g.\nAlex\nBea\nChris\n…")
+
+    fixed_pairs_text = ""
+    if use_fixed:
+        st.markdown("**Fixed pairs (optional)** — one pair per line, e.g. `1 & 2` or `Alex, Bea`. Leave blank to auto‑pair sequentially (1&2, 3&4, …).")
+        fixed_pairs_text = st.text_area("Pairs", height=140)
 
     run = st.button("Generate Schedule", type="primary")
 
@@ -260,23 +365,39 @@ status_box = st.empty()
 
 if run:
     names = parse_player_names(players, names_text)
+    fixed_pairs = None
+    if use_fixed:
+        fixed_pairs = parse_fixed_pairs(players, names, fixed_pairs_text)
 
-    # Try requested cap; if it fails, automatically escalate to the minimum cap that works (up to 2)
-    tried = []
+    # Try requested cap; if impossible, escalate to 2 and warn
     result = None
     for cap in [cap_requested, 2]:
-        tried.append(cap)
-        with st.spinner(f"Building schedule (cap={cap})…"):
-            result = generate_schedule(players, courts, rounds, cap, names, seed=seed_val)
+        try:
+            with st.spinner(f"Building schedule (cap={cap})…"):
+                result = generate_schedule(
+                    N=players,
+                    courts=courts,
+                    rounds=rounds,
+                    max_opp_repeat=cap,
+                    names=names,
+                    partner_mode='fixed' if use_fixed else 'rotate',
+                    fixed_pairs=fixed_pairs,
+                    seed=seed_val,
+                )
+        except ValueError as e:
+            st.error(str(e))
+            result = None
+            break
         if result is not None:
             effective_cap = cap
             break
+
     if result is None:
-        st.error("Could not construct a schedule with these settings. Try fewer rounds/players or more courts.")
+        st.error("Could not construct a schedule with these settings. Try adjusting players/courts/rounds.")
     else:
         columns, rows, stats, rest_per_round = result
         df = pd.DataFrame(rows, columns=columns)
-        # Center align cells/headers
+        # Center align cells and headers
         st.markdown(
             """
             <style>
@@ -287,12 +408,13 @@ if run:
             unsafe_allow_html=True,
         )
         if effective_cap > cap_requested:
-            st.warning(f"Max vs Any Opponent set to {cap_requested} was too strict for a valid schedule. The app used the minimum working cap = {effective_cap} while keeping all other rules.")
+            st.warning(f"Max vs Any Opponent = {cap_requested} was too strict; using minimum working cap = {effective_cap} while keeping all other rules.")
         else:
             st.success("Schedule ready!")
         st.subheader("Schedule")
         st.dataframe(df, use_container_width=True, hide_index=True)
-        # Download
         st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), file_name="pickleball_schedule.csv", mime="text/csv")
 else:
+    st.info("Set your event details in the sidebar and click **Generate Schedule**. Use ‘Stick with same partner’ to keep fixed teams (requires an even number of resting players each round)."}]}
+
     st.info("Set your event details in the sidebar and click **Generate Schedule**.")
