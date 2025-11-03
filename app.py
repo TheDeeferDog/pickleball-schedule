@@ -454,11 +454,12 @@ if run:
             effective_cap = cap
             break
 
-    if result is None:
+       if result is None:
         st.error("Could not construct a schedule with these settings. Try adjusting players/courts/rounds.")
     else:
         columns, rows, stats, rest_per_round = result
         df = pd.DataFrame(rows, columns=columns)
+
         # Center align cells and headers
         st.markdown(
             """
@@ -469,11 +470,15 @@ if run:
             """,
             unsafe_allow_html=True,
         )
+
         if effective_cap > cap_requested:
-            st.warning(f"Max vs Any Opponent = {cap_requested} was too strict; using minimum working cap = {effective_cap} while keeping all other rules.")
+            st.warning(
+                f"Max vs Any Opponent = {cap_requested} was too strict; using minimum working cap = {effective_cap} while keeping all other rules."
+            )
         else:
             st.success("Schedule ready!")
-               st.subheader("Schedule")
+
+        st.subheader("Schedule")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         # Download (CSV + Print-friendly PDF)
@@ -485,7 +490,7 @@ if run:
                 "Download CSV",
                 csv_bytes,
                 file_name="pickleball_schedule.csv",
-                mime="text/csv"
+                mime="text/csv",
             )
 
         with col_b:
@@ -495,7 +500,7 @@ if run:
                 "Get Print Version (PDF)",
                 data=pdf_bytes,
                 file_name="pickleball_schedule_print.pdf",
-                mime="application/pdf"
+                mime="application/pdf",
             )
 
 else:
@@ -504,4 +509,3 @@ else:
         "Use 'Stick with same partner' to keep fixed teams "
         "(requires an even number of resting players each round)."
     )
-
