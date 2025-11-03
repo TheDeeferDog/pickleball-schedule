@@ -64,7 +64,6 @@ def parse_fixed_pairs(N: int, names: List[str], text: str) -> List[Tuple[int, in
         used.add(b)
         pairs.append((a, b))
     if not pairs:
-        # default sequential pairing
         for i in range(0, N - (N % 2), 2):
             pairs.append((i, i + 1))
     return pairs
@@ -84,7 +83,6 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
     last_rest_round = [-99] * N
     schedule = []
 
-    # simple feasibility check for fixed mode
     if partner_mode == "fixed" and rest_per_round % 2 != 0:
         raise ValueError("Fixed partner mode requires an even number of resting players each round.")
 
@@ -160,7 +158,6 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
     start_time = time.time()
     best = None
     while time.time() - start_time < time_budget_sec:
-        # reset
         for i in range(N):
             rests_so_far[i] = 0
             last_rest_round[i] = -99
@@ -209,7 +206,7 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
 
 
 # ------------------------------------------------------------
-# PDF Builder
+# PDF Builder (improved readability)
 # ------------------------------------------------------------
 def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> bytes:
     buffer = BytesIO()
@@ -219,28 +216,38 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> 
     h = styles["Heading1"].clone("H")
     h.fontSize = 22 if big else 18
     story.append(Paragraph(title, h))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 10))
 
     cols = list(df.columns)
     round_col = cols[0]
     rest_col = cols[-1]
     courts = [c for c in cols[1:-1] if c.lower().startswith("court ")]
     chunks = [courts[i:i + 3] for i in range(0, len(courts), 3)] or [[]]
+
     for idx, group in enumerate(chunks):
         page_cols = [round_col] + group + [rest_col]
         data = [page_cols] + df[page_cols].values.tolist()
+
+        col_aligns = ["CENTER"] * len(page_cols)
+        col_aligns[-1] = "LEFT"  # Resting column left-aligned
+
         tbl = Table(data, repeatRows=1)
         tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ALIGN', (0, 0), (-2, -1), 'CENTER'),
+            ('ALIGN', (-1, 1), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('FONT', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, -1), 16 if big else 13),
+            ('TOPPADDING', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
         ]))
         story.append(tbl)
         if idx < len(chunks) - 1:
             story.append(PageBreak())
+
     doc.build(story)
     return buffer.getvalue()
 
