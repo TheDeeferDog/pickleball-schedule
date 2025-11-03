@@ -10,7 +10,7 @@ import streamlit as st
 # PDF
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
@@ -63,8 +63,7 @@ def parse_fixed_pairs(N: int, names: List[str], text: str) -> List[Tuple[int, in
         b = name_to_idx.get(parts[1], safe_int(parts[1], None))
         if a is None or b is None or a == b or a in used or b in used:
             continue
-        used.add(a)
-        used.add(b)
+        used.add(a); used.add(b)
         pairs.append((a, b))
     if not pairs:
         for i in range(0, N - (N % 2), 2):
@@ -100,11 +99,9 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
         scores = []
         for i in range(N):
             if rests_so_far[i] >= target_rests[i]:
-                scores.append((-1e9, i))
-                continue
+                scores.append((-1e9, i)); continue
             if r - last_rest_round[i] == 1:
-                scores.append((-1e6, i))
-                continue
+                scores.append((-1e6, i)); continue
             need = target_rests[i] - rests_so_far[i]
             since = r - last_rest_round[i]
             scores.append((need * 100 + since + random.random(), i))
@@ -140,16 +137,14 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
             b = random.choice(possible)
             avail.remove(b)
             result.append((a, b))
-            partner_pairs[a].add(b)
-            partner_pairs[b].add(a)
+            partner_pairs[a].add(b); partner_pairs[b].add(a)
         return result
 
     def group_into_courts(pairs):
         random.shuffle(pairs)
         courts_round = []
         for i in range(0, len(pairs), 2):
-            a, b = pairs[i]
-            c, d = pairs[i + 1]
+            a, b = pairs[i]; c, d = pairs[i + 1]
             if len({a, b, c, d}) < 4:
                 return None
             courts_round.append(((a, b), (c, d)))
@@ -174,22 +169,18 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
             else:
                 round_pairs = pair_players(avail)
             if not round_pairs or len(round_pairs) < courts * 2:
-                success = False
-                break
+                success = False; break
             courts_round = group_into_courts(round_pairs[: courts * 2])
             if not courts_round:
-                success = False
-                break
+                success = False; break
             schedule.append({"resting": resting, "courts": courts_round})
             for i in resting:
-                rests_so_far[i] += 1
-                last_rest_round[i] = r
+                rests_so_far[i] += 1; last_rest_round[i] = r
             for (a, b), (c, d) in courts_round:
                 for x, y in [(a, c), (a, d), (b, c), (b, d)]:
                     inc_opp(x, y)
         if success:
-            best = schedule
-            break
+            best = schedule; break
 
     if not best:
         return None
@@ -206,60 +197,58 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
 
 
 # ------------------------------------------------------------
-# PDF Builder — adaptive, large, and multi-page
+# PDF Builder — adaptive width, generous spacing, per-page Round column
 # ------------------------------------------------------------
-def _text_col_width(data: List[str], font_name: str, font_size: int, padding: float = 24.0) -> float:
-    """
-    Compute width needed for a column based on the widest text in `data`.
-    Adds padding for breathing room.
-    """
+def _measure_col_width(texts: List[str], font: str, size: int, pad: float) -> float:
     widest = 0.0
-    for s in data:
+    for s in texts:
         s = "" if s is None else str(s)
         try:
-            w = stringWidth(s, font_name, font_size)
+            w = stringWidth(s, font, size)
         except Exception:
-            w = len(s) * (font_size * 0.55)  # fallback rough estimate
+            w = len(s) * (size * 0.55)
         widest = max(widest, w)
-    return widest + padding
+    return widest + pad
 
 
-def _chunk_courts_by_width(df: pd.DataFrame, font_name: str, font_size: int, page_width: float) -> List[List[str]]:
+def _group_courts_for_pages(df: pd.DataFrame, font: str, size: int, page_width: float) -> List[List[str]]:
     """
-    Split court columns into groups that fit on a page with Round + Resting.
-    Uses measured text width of each column.
+    Pack as many 'Court X' columns per page as fit alongside Round and Resting.
+    Uses measured (unwrapped) widths, but we still wrap in the table to avoid overflow.
     """
     cols = list(df.columns)
     round_col = cols[0]
-    rest_col = cols[-1]
+    rest_col  = cols[-1]
     court_cols = [c for c in cols[1:-1] if c.lower().startswith("court ")]
 
-    # measure base widths
-    round_width = _text_col_width([round_col] + df[round_col].astype(str).tolist(), font_name, font_size)
-    rest_width  = _text_col_width([rest_col]  + df[rest_col].astype(str).tolist(),  font_name, font_size, padding=40.0)
+    # Measure base widths
+    round_w = _measure_col_width([round_col] + df[round_col].astype(str).tolist(), font, size, pad=28)
+    rest_w  = _measure_col_width([rest_col]  + df[rest_col].astype(str).tolist(),  font, size, pad=42)
 
-    # we'll pack courts greedily per page
     groups = []
-    current = []
-    current_width = round_width + rest_width  # fixed columns per page
-    # leave some extra margin
-    usable = page_width - 48
+    cur = []
+    cur_w = round_w + rest_w
+    usable = page_width - 72  # small guard to avoid clipping
 
     for c in court_cols:
-        col_width = _text_col_width([c] + df[c].astype(str).tolist(), font_name, font_size)
-        if current and current_width + col_width > usable:
-            groups.append(current)
-            current = [c]
-            current_width = round_width + rest_width + col_width
+        col_w = _measure_col_width([c] + df[c].astype(str).tolist(), font, size, pad=32)
+        if cur and cur_w + col_w > usable:
+            groups.append(cur)
+            cur = [c]; cur_w = round_w + rest_w + col_w
         else:
-            current.append(c)
-            current_width += col_width
-    if current:
-        groups.append(current)
+            cur.append(c); cur_w += col_w
+    if cur:
+        groups.append(cur)
 
-    # Ensure at least 2 courts per page if possible; if names are extremely long
-    # this may still drop to 1 per page — acceptable for legibility.
-    return groups or [[]]
+    # Avoid too many crammed columns: cap at 4, but allow dropping to 1–2 if names are very long.
+    capped = []
+    for g in groups:
+        if len(g) <= 4:
+            capped.append(g)
+        else:
+            for i in range(0, len(g), 4):
+                capped.append(g[i:i+4])
+    return capped or [[]]
 
 
 def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> bytes:
@@ -268,64 +257,109 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> 
     doc = SimpleDocTemplate(
         buffer,
         pagesize=page,
-        leftMargin=24,
-        rightMargin=24,
-        topMargin=28,
-        bottomMargin=28,
+        leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36,  # add comfortable page margins
+        title=title,
     )
     story = []
+
     styles = getSampleStyleSheet()
-    h = styles["Heading1"].clone("H")
-    h.fontSize = 22 if big else 18
-    h.leading = h.fontSize + 4
+    header_style = styles["Heading1"].clone("SchedHeader")
+    header_style.fontSize = 22 if big else 18
+    header_style.leading = header_style.fontSize + 6
 
-    story.append(Paragraph(title, h))
-    story.append(Spacer(1, 10))
-
-    # Fonts & paddings
+    # Paragraph styles for wrapping
     body_font = "Helvetica"
     body_size = 16 if big else 13
-    header_size = body_size + 1
+    body_leading = body_size + 4
+
+    cell_center = ParagraphStyle(
+        "CellCenter", parent=styles["BodyText"],
+        fontName=body_font, fontSize=body_size, leading=body_leading,
+        alignment=1  # center
+    )
+    cell_left = ParagraphStyle(
+        "CellLeft", parent=styles["BodyText"],
+        fontName=body_font, fontSize=body_size, leading=body_leading,
+        alignment=0  # left
+    )
+
+    # Table paddings
     row_top_pad = 12
     row_bottom_pad = 12
+    left_pad = 10
+    right_pad = 10
 
     cols = list(df.columns)
     round_col = cols[0]
-    rest_col = cols[-1]
+    rest_col  = cols[-1]
 
-    # Split courts by width so each page fits nicely with big text
-    court_groups = _chunk_courts_by_width(df, body_font, body_size, page_width=page[0])
+    # Decide how many court columns per page using width measurement
+    court_groups = _group_courts_for_pages(df, body_font, body_size, page_width=page[0])
 
     for idx, group in enumerate(court_groups):
-        page_cols = [round_col] + group + [rest_col]
-        data = [page_cols] + df[page_cols].values.tolist()
+        # Page header (title + which courts shown)
+        if group:
+            first_c = group[0].split()[-1]
+            last_c  = group[-1].split()[-1]
+            subtitle = f"{title} — Courts {first_c}–{last_c}"
+        else:
+            subtitle = title
 
-        tbl = Table(data, repeatRows=1)
+        story.append(Paragraph(subtitle, header_style))
+        story.append(Spacer(1, 10))
+
+        page_cols = [round_col] + group + [rest_col]
+        # Build wrapped cell data using Paragraphs
+        data = [page_cols]
+        for _, row in df.iterrows():
+            row_cells = []
+            for j, c in enumerate(page_cols):
+                txt = "" if pd.isna(row[c]) else str(row[c])
+                if j == len(page_cols) - 1:  # Resting column (left)
+                    row_cells.append(Paragraph(txt, cell_left))
+                else:
+                    row_cells.append(Paragraph(txt, cell_center))
+            data.append(row_cells)
+
+        # Compute col widths (share available width; Resting gets a bit more)
+        avail_w = page[0] - (doc.leftMargin + doc.rightMargin)
+        base_w = avail_w / len(page_cols)
+        col_widths = [base_w for _ in page_cols]
+        # bias Resting wider by 1.4x
+        rest_idx = len(page_cols) - 1
+        col_widths[rest_idx] = base_w * 1.4
+        # reduce others proportionally
+        reduce_each = (col_widths[rest_idx] - base_w) / (len(page_cols) - 1)
+        for i in range(len(page_cols) - 1):
+            col_widths[i] = max(base_w - reduce_each, 90)
+
+        tbl = Table(data, repeatRows=1, colWidths=col_widths, hAlign="CENTER")
         tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
 
-            # Alignment: center everywhere EXCEPT Resting column which is left
+            # Alignment: center everywhere except Resting column
             ('ALIGN', (0, 0), (-2, -1), 'CENTER'),
             ('ALIGN', (-1, 0), (-1, 0), 'CENTER'),  # Resting header centered
-            ('ALIGN', (-1, 1), (-1, -1), 'LEFT'),    # Resting cells left
+            ('ALIGN', (-1, 1), (-1, -1), 'LEFT'),   # Resting cells left
 
-            # Vertical centering & comfortable row height
+            # Vertical centering & generous paddings for big text
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('TOPPADDING', (0, 0), (-1, -1), row_top_pad),
             ('BOTTOMPADDING', (0, 0), (-1, -1), row_bottom_pad),
+            ('LEFTPADDING', (0, 0), (-1, -1), left_pad),
+            ('RIGHTPADDING', (0, 0), (-1, -1), right_pad),
 
+            # Fonts
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE',  (0, 0), (-1, 0), header_size),
-            ('FONTNAME',  (0, 1), (-1, -1), body_font),
-            ('FONTSIZE',  (0, 1), (-1, -1), body_size),
-
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+            ('FONTSIZE',  (0, 0), (-1, 0), body_size + 1),
         ]))
         story.append(tbl)
 
         if idx < len(court_groups) - 1:
             story.append(PageBreak())
+        else:
+            story.append(Spacer(1, 6))
 
     doc.build(story)
     return buffer.getvalue()
