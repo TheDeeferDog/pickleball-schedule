@@ -72,7 +72,7 @@ def parse_fixed_pairs(N: int, names: List[str], text: str) -> List[Tuple[int, in
 
 
 # ------------------------------------------------------------
-# Schedule generator (kept simple & reliable)
+# Schedule generator (simple & reliable baseline)
 # ------------------------------------------------------------
 def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fixed_pairs=None, seed=None, time_budget_sec=4.0):
     if seed:
@@ -197,9 +197,9 @@ def generate_schedule(N, courts, rounds, max_opp_repeat, names, partner_mode, fi
 
 
 # ------------------------------------------------------------
-# PDF Builder — adaptive width, generous spacing, per-page Round column
+# PDF Builder — narrow Round, Resting treated like a court, adaptive paging
 # ------------------------------------------------------------
-def _measure_col_width(texts: List[str], font: str, size: int, pad: float) -> float:
+def _measure_width(texts: List[str], font: str, size: int, pad: float) -> float:
     widest = 0.0
     for s in texts:
         s = "" if s is None else str(s)
@@ -211,36 +211,42 @@ def _measure_col_width(texts: List[str], font: str, size: int, pad: float) -> fl
     return widest + pad
 
 
-def _group_courts_for_pages(df: pd.DataFrame, font: str, size: int, page_width: float) -> List[List[str]]:
+def _group_cols_across_pages(df: pd.DataFrame, font: str, size: int, page_width: float, margins: Tuple[float, float]) -> List[List[str]]:
     """
-    Pack as many 'Court X' columns per page as fit alongside Round and Resting.
-    Uses measured (unwrapped) widths, but we still wrap in the table to avoid overflow.
+    Pack variable columns (Court 1..N and Resting) across pages alongside a *fixed-narrow* Round column.
+    Resting is treated like a court and may appear only on the final page(s).
     """
+    left_margin, right_margin = margins
     cols = list(df.columns)
     round_col = cols[0]
-    rest_col  = cols[-1]
     court_cols = [c for c in cols[1:-1] if c.lower().startswith("court ")]
+    resting_col = cols[-1]  # treat as variable like a court
+    var_cols = court_cols + [resting_col]
 
-    # Measure base widths
-    round_w = _measure_col_width([round_col] + df[round_col].astype(str).tolist(), font, size, pad=28)
-    rest_w  = _measure_col_width([rest_col]  + df[rest_col].astype(str).tolist(),  font, size, pad=42)
+    # Make Round column narrow: measure only header + a few digits; small padding
+    round_samples = [round_col] + [str(i) for i in range(1, min(100, len(df) + 1))]
+    round_w = _measure_width(round_samples, font, size, pad=18)  # tight
+
+    usable = page_width - (left_margin + right_margin)
 
     groups = []
     cur = []
-    cur_w = round_w + rest_w
-    usable = page_width - 72  # small guard to avoid clipping
+    cur_width = round_w  # fixed round column width counted on every page
 
-    for c in court_cols:
-        col_w = _measure_col_width([c] + df[c].astype(str).tolist(), font, size, pad=32)
-        if cur and cur_w + col_w > usable:
+    # Greedy pack variable columns by measured width
+    for c in var_cols:
+        col_w = _measure_width([c] + df[c].astype(str).tolist(), font, size, pad=30)
+        if cur and cur_width + col_w > usable:
             groups.append(cur)
-            cur = [c]; cur_w = round_w + rest_w + col_w
+            cur = [c]
+            cur_width = round_w + col_w
         else:
-            cur.append(c); cur_w += col_w
+            cur.append(c)
+            cur_width += col_w
     if cur:
         groups.append(cur)
 
-    # Avoid too many crammed columns: cap at 4, but allow dropping to 1–2 if names are very long.
+    # Soft cap at 4 columns per page (names may allow 3–4; long names may reduce to 1–2)
     capped = []
     for g in groups:
         if len(g) <= 4:
@@ -248,16 +254,21 @@ def _group_courts_for_pages(df: pd.DataFrame, font: str, size: int, page_width: 
         else:
             for i in range(0, len(g), 4):
                 capped.append(g[i:i+4])
+
+    # Always return at least one group
     return capped or [[]]
 
 
 def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> bytes:
     buffer = BytesIO()
     page = landscape(letter)
+    left_margin = right_margin = top_margin = bottom_margin = 36  # comfortable margins
+
     doc = SimpleDocTemplate(
         buffer,
         pagesize=page,
-        leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36,  # add comfortable page margins
+        leftMargin=left_margin, rightMargin=right_margin,
+        topMargin=top_margin, bottomMargin=bottom_margin,
         title=title,
     )
     story = []
@@ -267,7 +278,6 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> 
     header_style.fontSize = 22 if big else 18
     header_style.leading = header_style.fontSize + 6
 
-    # Paragraph styles for wrapping
     body_font = "Helvetica"
     body_size = 16 if big else 13
     body_leading = body_size + 4
@@ -283,7 +293,7 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> 
         alignment=0  # left
     )
 
-    # Table paddings
+    # Row/cell padding
     row_top_pad = 12
     row_bottom_pad = 12
     left_pad = 10
@@ -291,57 +301,74 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> 
 
     cols = list(df.columns)
     round_col = cols[0]
-    rest_col  = cols[-1]
+    resting_col = cols[-1]
+    court_cols = [c for c in cols[1:-1] if c.lower().startswith("court ")]
 
-    # Decide how many court columns per page using width measurement
-    court_groups = _group_courts_for_pages(df, body_font, body_size, page_width=page[0])
+    # Decide groupings: Round appears on every page; Resting is *variable* (like a court)
+    groups = _group_cols_across_pages(df, body_font, body_size, page_width=page[0], margins=(left_margin, right_margin))
 
-    for idx, group in enumerate(court_groups):
-        # Page header (title + which courts shown)
-        if group:
-            first_c = group[0].split()[-1]
-            last_c  = group[-1].split()[-1]
-            subtitle = f"{title} — Courts {first_c}–{last_c}"
+    for idx, group in enumerate(groups):
+        # Determine which courts/resting are on this page
+        # Build a nice subtitle that reflects which columns are shown
+        courts_in_group = [c for c in group if c != resting_col]
+        show_resting = resting_col in group
+
+        if courts_in_group:
+            first_c = courts_in_group[0].split()[-1]
+            last_c  = courts_in_group[-1].split()[-1]
+            if first_c == last_c:
+                subtitle = f"{title} — Court {first_c}"
+            else:
+                subtitle = f"{title} — Courts {first_c}–{last_c}"
         else:
-            subtitle = title
+            subtitle = f"{title} — Resting"
 
         story.append(Paragraph(subtitle, header_style))
         story.append(Spacer(1, 10))
 
-        page_cols = [round_col] + group + [rest_col]
-        # Build wrapped cell data using Paragraphs
+        page_cols = [round_col] + group  # Round always first
+        # Build wrapped Paragraph cells
         data = [page_cols]
         for _, row in df.iterrows():
             row_cells = []
             for j, c in enumerate(page_cols):
                 txt = "" if pd.isna(row[c]) else str(row[c])
-                if j == len(page_cols) - 1:  # Resting column (left)
+                if c == resting_col:  # Resting left
                     row_cells.append(Paragraph(txt, cell_left))
-                else:
+                else:  # Round + Court columns centered
                     row_cells.append(Paragraph(txt, cell_center))
             data.append(row_cells)
 
-        # Compute col widths (share available width; Resting gets a bit more)
-        avail_w = page[0] - (doc.leftMargin + doc.rightMargin)
-        base_w = avail_w / len(page_cols)
-        col_widths = [base_w for _ in page_cols]
-        # bias Resting wider by 1.4x
-        rest_idx = len(page_cols) - 1
-        col_widths[rest_idx] = base_w * 1.4
-        # reduce others proportionally
-        reduce_each = (col_widths[rest_idx] - base_w) / (len(page_cols) - 1)
-        for i in range(len(page_cols) - 1):
-            col_widths[i] = max(base_w - reduce_each, 90)
+        # Column widths: Round narrow (measured), others share remaining by measurement bias
+        round_samples = [round_col] + [str(i) for i in range(1, min(100, len(df) + 1))]
+        round_w = _measure_width(round_samples, body_font, body_size, pad=18)
+        avail_w = page[0] - (left_margin + right_margin)
+        # Estimate widths for variable columns on this page
+        var_widths = []
+        total_var_w = 0.0
+        for c in group:
+            pad = 30 if c != resting_col else 36
+            w = _measure_width([c] + df[c].astype(str).tolist(), body_font, body_size, pad=pad)
+            var_widths.append(w)
+            total_var_w += w
+
+        # Scale variable widths to fit remaining space
+        remaining = max(avail_w - round_w, 200)
+        if total_var_w > 0:
+            scale = min(1.0, remaining / total_var_w)
+        else:
+            scale = 1.0
+
+        col_widths = [round_w] + [w * scale for w in var_widths]
 
         tbl = Table(data, repeatRows=1, colWidths=col_widths, hAlign="CENTER")
         tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
 
-            # Alignment: center everywhere except Resting column
-            ('ALIGN', (0, 0), (-2, -1), 'CENTER'),
-            ('ALIGN', (-1, 0), (-1, 0), 'CENTER'),  # Resting header centered
-            ('ALIGN', (-1, 1), (-1, -1), 'LEFT'),   # Resting cells left
+            # Alignment rules (already applied by Paragraphs, but keep for safety)
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ALIGN', (-1, 1), (-1, -1), 'LEFT') if show_resting else ('ALIGN', (0,0), (0,0), 'CENTER'),
 
             # Vertical centering & generous paddings for big text
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
@@ -356,10 +383,10 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", big=True) -> 
         ]))
         story.append(tbl)
 
-        if idx < len(court_groups) - 1:
+        if idx < len(groups) - 1:
             story.append(PageBreak())
         else:
-            story.append(Spacer(1, 6))
+            story.append(Spacer(1, 8))
 
     doc.build(story)
     return buffer.getvalue()
