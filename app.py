@@ -5,6 +5,12 @@ from typing import List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
+from io import BytesIO
+# PDF generation
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 # ------------------------------
 # UI CONFIG
@@ -359,6 +365,62 @@ with st.sidebar:
     run = st.button("Generate Schedule", type="primary")
 
 # ------------------------------
+# PDF helper
+# ------------------------------
+
+def build_print_pdf(df: pd.DataFrame, title: str = "Pickleball Schedule", big: bool = True) -> bytes:
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(letter),
+        leftMargin=24,
+        rightMargin=24,
+        topMargin=28,
+        bottomMargin=28,
+    )
+    story = []
+
+    styles = getSampleStyleSheet()
+    h_style = styles["Heading1"].clone("H1")
+    h_style.fontSize = 20 if big else 16
+    h_style.leading = h_style.fontSize + 2
+
+    story.append(Paragraph(title, h_style))
+    story.append(Spacer(1, 8))
+
+    data = [list(df.columns)] + df.values.tolist()
+    page_width, _ = landscape(letter)
+    avail_width = page_width - 48
+    col_count = len(df.columns)
+    base = avail_width / col_count
+    col_widths = [base for _ in range(col_count)]
+    if col_count >= 2:
+        col_widths[-1] = base * 1.6
+        reduce_each = (col_widths[-1] - base) / (col_count - 1)
+        for i in range(col_count - 1):
+            col_widths[i] -= reduce_each
+
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+    body_size = 14 if big else 12
+    header_size = 15 if big else 13
+    tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), header_size),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
+        ('FONTSIZE', (0,1), (-1,-1), body_size),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.white]),
+    ]))
+
+    story.append(tbl)
+    doc.build(story)
+    return buffer.getvalue()
+
+# ------------------------------
 # Main Panel
 # ------------------------------
 status_box = st.empty()
@@ -413,10 +475,13 @@ if run:
             st.success("Schedule ready!")
         st.subheader("Schedule")
         st.dataframe(df, use_container_width=True, hide_index=True)
-        st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), file_name="pickleball_schedule.csv", mime="text/csv")
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        col_a, col_b = st.columns([1,1])
+        with col_a:
+            st.download_button("Download CSV", csv_bytes, file_name="pickleball_schedule.csv", mime="text/csv")
+        with col_b:
+            big = st.checkbox("Large print (recommended)", value=True)
+            pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", big=big)
+            st.download_button("Get Print Version (PDF)", data=pdf_bytes, file_name="pickleball_schedule_print.pdf", mime="application/pdf").encode("utf-8"), file_name="pickleball_schedule.csv", mime="text/csv")
 else:
-    st.info(
-        "Set your event details in the sidebar and click **Generate Schedule**. "
-        "Use 'Stick with same partner' to keep fixed teams "
-        "(requires an even number of resting players each round)."
-    )
+    st.info("Set your event details in the sidebar and click **Generate Schedule**. Use ‘Stick with same partner’ to keep fixed teams (requires an even number of resting players each round)."}]}
