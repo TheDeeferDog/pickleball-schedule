@@ -698,13 +698,12 @@ with st.sidebar:
 
         pairs_text = st.text_area(
             "Fixed Team Pairs",
-            value=(
-                "Tracy Thompson & Dave Jones\n"
-                "Maureen MacLean & Peter MacLean\n"
-                "Michele Van Grol & Jeff Solway\n"
-                "Annie Allard & Bill Jenkins\n"
-                "Elma Melhus & Bryan Melhus\n"
-                "Alfie Colombo Mark Slater"
+            value="",
+            placeholder=(
+                "Enter one pair per line, for example:\n"
+                "Beddie & John\n"
+                "Alex Smith Maria Jones\n"
+                "Sam / Lee"
             ),
             help=(
                 "Enter one pair per line. You can use &, comma, slash, or four-word names. "
