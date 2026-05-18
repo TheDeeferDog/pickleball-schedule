@@ -26,8 +26,8 @@ st.set_page_config(
 
 st.title("🎾 Pickleball Schedule Generator")
 st.caption(
-    "Rotate partners, fixed team pairs, evenly spaced rests, capped repeat opponents, "
-    "and printable large-font schedules."
+    "Rotate partners, fixed team pairs, named courts, evenly spaced rests, "
+    "capped repeat opponents, and printable large-font schedules."
 )
 
 
@@ -46,6 +46,38 @@ def compute_target_rests(N: int, rounds: int, courts: int):
 def parse_player_names(count: int, text: str) -> List[str]:
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     return [lines[i] if i < len(lines) else f"{i + 1}" for i in range(count)]
+
+
+def parse_court_names(courts: int, text: str) -> List[str]:
+    """
+    Parses optional court names entered one per line.
+
+    Examples:
+    1
+    2
+    3
+
+    becomes:
+    Court 1, Court 2, Court 3
+
+    If the user enters "North Court" or "Court 5", that exact label is used.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+    court_names = []
+
+    for i in range(courts):
+        if i < len(lines):
+            label = lines[i]
+
+            if label.lower().startswith("court") or "court" in label.lower():
+                court_names.append(label)
+            else:
+                court_names.append(f"Court {label}")
+        else:
+            court_names.append(f"Court {i + 1}")
+
+    return court_names
 
 
 def safe_int(s: str, default: Optional[int]) -> Optional[int]:
@@ -95,6 +127,7 @@ def parse_team_pairs(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
 
     For four-word lines with no separator, it assumes:
     Firstname Lastname Firstname Lastname
+
     Example:
     Alfie Colombo Mark Slater -> Alfie Colombo & Mark Slater
     """
@@ -134,7 +167,11 @@ def parse_team_pairs(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
 # ------------------------------------------------------------
 # Fixed-pair round robin generator
 # ------------------------------------------------------------
-def generate_fixed_pair_round_robin(team_pairs: List[Tuple[str, str]], courts: int):
+def generate_fixed_pair_round_robin(
+    team_pairs: List[Tuple[str, str]],
+    courts: int,
+    court_names: List[str],
+):
     """
     Generates a fixed-pair round robin schedule.
 
@@ -172,7 +209,7 @@ def generate_fixed_pair_round_robin(team_pairs: List[Tuple[str, str]], courts: i
         # Rotate all teams except the first.
         team_order = [team_order[0]] + [team_order[-1]] + team_order[1:-1]
 
-    columns = ["Round"] + [f"Court {i + 1}" for i in range(courts)] + ["Resting"]
+    columns = ["Round"] + court_names + ["Resting"]
     rows = []
 
     display_round = 1
@@ -214,6 +251,7 @@ def generate_schedule(
     max_opp_repeat,
     names,
     partner_mode,
+    court_names,
     fixed_pairs=None,
     seed=None,
     time_budget_sec=4.0,
@@ -385,7 +423,7 @@ def generate_schedule(
     if not best:
         return None
 
-    columns = ["Round"] + [f"Court {i + 1}" for i in range(courts)] + ["Resting"]
+    columns = ["Round"] + court_names + ["Resting"]
     rows = []
 
     for r, rd in enumerate(best, start=1):
@@ -427,18 +465,18 @@ def _group_cols_across_pages(
     margins: Tuple[float, float],
 ) -> List[List[str]]:
     """
-    Pack variable columns, Court 1..N and Resting, across pages alongside
-    a fixed narrow Round column.
-
-    Resting is treated like a court and may appear only on the final page(s).
+    Pack game columns and Resting across pages alongside a fixed narrow Round column.
+    This supports custom court names such as Court 2, Court 4, North, South, etc.
     """
     left_margin, right_margin = margins
     cols = list(df.columns)
 
     round_col = cols[0]
-    court_cols = [c for c in cols[1:-1] if c.lower().startswith("court ")]
     resting_col = cols[-1]
-    var_cols = court_cols + [resting_col]
+
+    # Everything between Round and Resting is treated as a court/game column.
+    game_cols = cols[1:-1]
+    var_cols = game_cols + [resting_col]
 
     round_samples = [round_col] + [str(i) for i in range(1, min(100, len(df) + 1))]
     round_w = _measure_width(round_samples, font, size, pad=18)
@@ -545,17 +583,14 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", pdf_size="Lar
     )
 
     for idx, group in enumerate(groups):
-        courts_in_group = [c for c in group if c != resting_col]
+        game_cols_in_group = [c for c in group if c != resting_col]
         show_resting = resting_col in group
 
-        if courts_in_group:
-            first_c = courts_in_group[0].split()[-1]
-            last_c = courts_in_group[-1].split()[-1]
-            subtitle = (
-                f"{title} — Court {first_c}"
-                if first_c == last_c
-                else f"{title} — Courts {first_c}–{last_c}"
-            )
+        if game_cols_in_group:
+            if len(game_cols_in_group) == 1:
+                subtitle = f"{title} — {game_cols_in_group[0]}"
+            else:
+                subtitle = f"{title} — {game_cols_in_group[0]} to {game_cols_in_group[-1]}"
         else:
             subtitle = f"{title} — Resting"
 
@@ -652,6 +687,15 @@ with st.sidebar:
         with col2:
             pdf_size = st.radio("PDF Font Size", ["Large", "X-Large"], index=0)
 
+        court_names_text = st.text_area(
+            "Court Names, optional",
+            value="\n".join(str(i + 1) for i in range(courts)),
+            help="Enter one court name per line. Examples: 1, 2, 3 or 2, 4, 5.",
+            height=90,
+        )
+
+        court_names = parse_court_names(courts, court_names_text)
+
         pairs_text = st.text_area(
             "Fixed Team Pairs",
             value=(
@@ -681,6 +725,15 @@ with st.sidebar:
 
         with col2:
             courts = st.number_input("Courts", min_value=1, max_value=25, value=3, step=1)
+
+        court_names_text = st.text_area(
+            "Court Names, optional",
+            value="\n".join(str(i + 1) for i in range(courts)),
+            help="Enter one court name per line. Examples: 1, 2, 3 or 2, 4, 5.",
+            height=90,
+        )
+
+        court_names = parse_court_names(courts, court_names_text)
 
         rounds = st.number_input("Rounds", min_value=1, max_value=50, value=10, step=1)
 
@@ -721,7 +774,7 @@ if run:
                 result = None
                 st.error("Please enter at least two fixed pairs.")
             else:
-                result = generate_fixed_pair_round_robin(team_pairs, courts)
+                result = generate_fixed_pair_round_robin(team_pairs, courts, court_names)
 
         else:
             names = parse_player_names(players, names_text)
@@ -733,6 +786,7 @@ if run:
                 cap,
                 names,
                 "rotate",
+                court_names,
                 None,
                 seed_val,
             )
