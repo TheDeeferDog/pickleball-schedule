@@ -1,8 +1,9 @@
 import time
 import random
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import List, Tuple, Optional
 from io import BytesIO
+from itertools import permutations
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +19,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 # ------------------------------------------------------------
 # Streamlit page setup
 # ------------------------------------------------------------
-APP_VERSION = "court randomizer v4"
+APP_VERSION = "balanced court assignment v5"
 
 st.set_page_config(
     page_title="Pickleball Schedule Generator",
@@ -29,7 +30,7 @@ st.set_page_config(
 st.title("🎾 Pickleball Schedule Generator")
 st.caption(
     f"Version: {APP_VERSION} — Rotate partners, fixed team pairs, named courts, "
-    "evenly spaced rests, capped repeat opponents, randomized court assignments, "
+    "evenly spaced rests, capped repeat opponents, balanced court assignments, "
     "and printable large-font schedules."
 )
 
@@ -84,9 +85,6 @@ def split_name_line_without_separator(line: str) -> Optional[Tuple[str, str]]:
     Maureen MacLean Peter MacLean -> Maureen MacLean & Peter MacLean
     Michele Van Grol Jeff Solway -> Michele Van Grol & Jeff Solway
     Alfie Colombo Mark Slater -> Alfie Colombo & Mark Slater
-
-    This cannot be perfect for every possible name, but it covers the common
-    club-use cases where names are usually 1-3 words each.
     """
     clean = " ".join(line.replace("\t", " ").split())
     words = clean.split()
@@ -95,24 +93,18 @@ def split_name_line_without_separator(line: str) -> Optional[Tuple[str, str]]:
     if n < 2:
         return None
 
-    # Two single-word names: John Mary
     if n == 2:
         return words[0], words[1]
 
-    # One single-word name and one two-word name: John Mary Smith
     if n == 3:
         return words[0], " ".join(words[1:])
 
-    # Most common: First Last First Last
     if n == 4:
         return " ".join(words[:2]), " ".join(words[2:])
 
-    # Handles: Michele Van Grol Jeff Solway
-    # Assumes first player has 3 words and second has 2 words.
     if n == 5:
         return " ".join(words[:3]), " ".join(words[3:])
 
-    # Handles: Mary Ann Smith Bob Van Dyke
     if n == 6:
         return " ".join(words[:3]), " ".join(words[3:])
 
@@ -137,8 +129,6 @@ def parse_team_pairs(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
 
     for ln in lines:
         clean = " ".join(ln.replace("\t", " ").split())
-
-        # Normalize several explicit separators to comma.
         has_separator = any(sep in clean for sep in ["&", ",", "/", " - ", " – ", " — "])
 
         if has_separator:
@@ -169,6 +159,96 @@ def parse_team_pairs(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     return pairs, skipped_lines
 
 
+def fixed_game_participants(game):
+    """
+    Fixed team-pair game:
+    game = ("Team A", "Team B")
+    """
+    return [game[0], game[1]]
+
+
+def rotate_game_participants(game):
+    """
+    Rotating-player game:
+    game = ((a, b), (c, d))
+    """
+    (a, b), (c, d) = game
+    return [a, b, c, d]
+
+
+def balanced_assign_games_to_courts(games, courts: int, court_counts, participant_func):
+    """
+    Assigns games to court columns while minimizing repeated court use.
+
+    This does not change:
+    - who partners with whom
+    - who plays whom
+    - who rests
+    - opponent caps
+    - round-robin structure
+
+    It only chooses which court column each already-valid game appears under.
+    """
+    court_slots = list(range(courts))
+    num_games = len(games)
+
+    if num_games == 0:
+        return [None] * courts
+
+    # For typical pickleball use, courts are small enough to evaluate every assignment.
+    # For very large court counts, use random sampling to avoid excessive permutations.
+    possible_assignments = []
+
+    if courts <= 8 and num_games <= courts:
+        possible_assignments = list(permutations(court_slots, num_games))
+    else:
+        seen = set()
+        attempts = min(3000, max(300, courts * 150))
+
+        for _ in range(attempts):
+            assignment = tuple(random.sample(court_slots, num_games))
+            if assignment not in seen:
+                seen.add(assignment)
+                possible_assignments.append(assignment)
+
+    best_assignment = None
+    best_score = None
+
+    for assignment in possible_assignments:
+        score = 0
+
+        for game_index, court_index in enumerate(assignment):
+            participants = participant_func(games[game_index])
+
+            for participant in participants:
+                current_count = court_counts[participant][court_index]
+
+                # Strongly penalize assigning someone to a court they have already used often.
+                score += current_count * 100
+
+                # Slightly prefer courts the participant has never used.
+                if current_count == 0:
+                    score -= 5
+
+        # Tiny random tie-breaker so equally good options do not always choose the same layout.
+        score += random.random()
+
+        if best_score is None or score < best_score:
+            best_score = score
+            best_assignment = assignment
+
+    court_games = [None] * courts
+
+    for game_index, court_index in enumerate(best_assignment):
+        game = games[game_index]
+        court_games[court_index] = game
+
+        for participant in participant_func(game):
+            court_counts[participant][court_index] += 1
+
+    return court_games
+
+
 # ------------------------------------------------------------
 # Fixed-pair round robin generator
 # ------------------------------------------------------------
@@ -184,8 +264,7 @@ def generate_fixed_pair_round_robin(
     Each pair plays every other pair once.
     Games are grouped into schedule rows based on number of courts.
 
-    Court assignment is randomized within each block of games, without changing
-    the matchups or round-robin rules.
+    Court assignment is balanced so teams are not repeatedly placed on the same court.
     """
 
     if len(team_pairs) < 2:
@@ -223,25 +302,32 @@ def generate_fixed_pair_round_robin(
     display_round = 1
     real_teams = [team for team in teams if team != "BYE"]
 
+    # Tracks each team's court usage.
+    court_counts = defaultdict(lambda: [0] * courts)
+
     for rr_round_games in round_groups:
         for i in range(0, len(rr_round_games), courts):
             block = rr_round_games[i:i + courts]
 
-            # Randomize only the court assignment within this block.
-            # This does not change opponents, partners, or who rests.
-            block = block.copy()
-            random.shuffle(block)
+            # Assign these games to courts in the most balanced way.
+            court_games = balanced_assign_games_to_courts(
+                block,
+                courts,
+                court_counts,
+                fixed_game_participants,
+            )
 
             active_teams = set()
             cells = [display_round]
 
-            for team_a, team_b in block:
-                cells.append(f"{team_a} V {team_b}")
-                active_teams.add(team_a)
-                active_teams.add(team_b)
-
-            while len(cells) < courts + 1:
-                cells.append("")
+            for game in court_games:
+                if game is None:
+                    cells.append("")
+                else:
+                    team_a, team_b = game
+                    cells.append(f"{team_a} V {team_b}")
+                    active_teams.add(team_a)
+                    active_teams.add(team_b)
 
             resting = [team for team in real_teams if team not in active_teams]
             cells.append(", ".join(resting))
@@ -274,6 +360,9 @@ def generate_schedule(
     rests_so_far = [0] * N
     last_rest_round = [-99] * N
     base_order = list(range(N))
+
+    # Tracks each player's court usage in rotating mode.
+    court_counts = defaultdict(lambda: [0] * courts)
 
     def inc_opp(i, j):
         opponent_counts[i][j] += 1
@@ -363,6 +452,7 @@ def generate_schedule(
             opponent_counts[i].clear()
             partner_pairs[i].clear()
 
+        court_counts = defaultdict(lambda: [0] * courts)
         schedule = []
         success = True
 
@@ -383,18 +473,23 @@ def generate_schedule(
                 success = False
                 break
 
-            # Randomize only which physical/named court each valid game appears on.
-            # This does not change partners, opponents, rests, or opponent caps.
-            courts_round = courts_round.copy()
-            random.shuffle(courts_round)
+            # Assign valid games to courts in the most balanced way.
+            court_games = balanced_assign_games_to_courts(
+                courts_round,
+                courts,
+                court_counts,
+                rotate_game_participants,
+            )
 
-            schedule.append({"resting": resting, "courts": courts_round})
+            courts_round_balanced = [game for game in court_games if game is not None]
+
+            schedule.append({"resting": resting, "court_games": court_games, "courts": courts_round_balanced})
 
             for i in resting:
                 rests_so_far[i] += 1
                 last_rest_round[i] = r
 
-            for (a, b), (c, d) in courts_round:
+            for (a, b), (c, d) in courts_round_balanced:
                 for x, y in [(a, c), (a, d), (b, c), (b, d)]:
                     inc_opp(x, y)
 
@@ -411,8 +506,12 @@ def generate_schedule(
     for r, rd in enumerate(best, start=1):
         cells = [r]
 
-        for (a, b), (c, d) in rd["courts"]:
-            cells.append(f"{names[a]} & {names[b]} V {names[c]} & {names[d]}")
+        for game in rd["court_games"]:
+            if game is None:
+                cells.append("")
+            else:
+                (a, b), (c, d) = game
+                cells.append(f"{names[a]} & {names[b]} V {names[c]} & {names[d]}")
 
         cells.append(", ".join(names[i] for i in sorted(rd["resting"])))
         rows.append(cells)
