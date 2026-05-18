@@ -18,6 +18,8 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 # ------------------------------------------------------------
 # Streamlit page setup
 # ------------------------------------------------------------
+APP_VERSION = "fixed-pair parser v3"
+
 st.set_page_config(
     page_title="Pickleball Schedule Generator",
     page_icon="🎾",
@@ -26,8 +28,8 @@ st.set_page_config(
 
 st.title("🎾 Pickleball Schedule Generator")
 st.caption(
-    "Rotate partners, fixed team pairs, named courts, evenly spaced rests, "
-    "capped repeat opponents, and printable large-font schedules."
+    f"Version: {APP_VERSION} — Rotate partners, fixed team pairs, named courts, "
+    "evenly spaced rests, capped repeat opponents, and printable large-font schedules."
 )
 
 
@@ -49,27 +51,12 @@ def parse_player_names(count: int, text: str) -> List[str]:
 
 
 def parse_court_names(courts: int, text: str) -> List[str]:
-    """
-    Parses optional court names entered one per line.
-
-    Examples:
-    1
-    2
-    3
-
-    becomes:
-    Court 1, Court 2, Court 3
-
-    If the user enters "North Court" or "Court 5", that exact label is used.
-    """
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-
     court_names = []
 
     for i in range(courts):
         if i < len(lines):
-            label = lines[i]
-
+            label = lines[i].strip()
             if label.lower().startswith("court") or "court" in label.lower():
                 court_names.append(label)
             else:
@@ -87,57 +74,82 @@ def safe_int(s: str, default: Optional[int]) -> Optional[int]:
         return default
 
 
-def parse_fixed_pairs(N: int, names: List[str], text: str) -> List[Tuple[int, int]]:
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-    name_to_idx = {names[i]: i for i in range(N)}
-    pairs = []
-    used = set()
+def split_name_line_without_separator(line: str) -> Optional[Tuple[str, str]]:
+    """
+    Best-effort split when the user does not type &, comma, slash, or dash.
 
-    for ln in lines:
-        parts = [p.strip() for p in ln.replace("&", ",").split(",") if p.strip()]
-        if len(parts) != 2:
-            continue
+    Handles examples like:
+    Tracy Thompson Dave Jones -> Tracy Thompson & Dave Jones
+    Maureen MacLean Peter MacLean -> Maureen MacLean & Peter MacLean
+    Michele Van Grol Jeff Solway -> Michele Van Grol & Jeff Solway
+    Alfie Colombo Mark Slater -> Alfie Colombo & Mark Slater
 
-        a = name_to_idx.get(parts[0], safe_int(parts[0], None))
-        b = name_to_idx.get(parts[1], safe_int(parts[1], None))
+    This cannot be perfect for every possible name, but it covers the common
+    club-use cases where names are usually 1-3 words each.
+    """
+    clean = " ".join(line.replace("\t", " ").split())
+    words = clean.split()
+    n = len(words)
 
-        if a is None or b is None or a == b or a in used or b in used:
-            continue
+    if n < 2:
+        return None
 
-        used.add(a)
-        used.add(b)
-        pairs.append((a, b))
+    # Two single-word names: John Mary
+    if n == 2:
+        return words[0], words[1]
 
-    if not pairs:
-        for i in range(0, N - (N % 2), 2):
-            pairs.append((i, i + 1))
+    # One single-word name and one two-word name: John Mary Smith
+    if n == 3:
+        return words[0], " ".join(words[1:])
 
-    return pairs
+    # Most common: First Last First Last
+    if n == 4:
+        return " ".join(words[:2]), " ".join(words[2:])
+
+    # Handles: Michele Van Grol Jeff Solway
+    # Assumes first player has 3 words and second has 2 words.
+    if n == 5:
+        return " ".join(words[:3]), " ".join(words[3:])
+
+    # Handles: Mary Ann Smith Bob Van Dyke
+    if n == 6:
+        return " ".join(words[:3]), " ".join(words[3:])
+
+    return None
 
 
 def parse_team_pairs(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     """
     Parses fixed team pairs entered one per line.
 
-    Accepted formats:
+    Accepted examples:
     Beddie & John
     Beddie, John
     Beddie / John
-    Alfie Colombo Mark Slater
-
-    For four-word lines with no separator, it assumes:
-    Firstname Lastname Firstname Lastname
-
-    Example:
-    Alfie Colombo Mark Slater -> Alfie Colombo & Mark Slater
+    Beddie - John
+    Tracy Thompson Dave Jones
+    Michele Van Grol Jeff Solway
     """
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     pairs = []
     skipped_lines = []
 
     for ln in lines:
-        if "&" in ln or "," in ln or "/" in ln:
-            normalized = ln.replace("&", ",").replace("/", ",")
+        clean = " ".join(ln.replace("\t", " ").split())
+
+        # Normalize several explicit separators to comma.
+        has_separator = any(sep in clean for sep in ["&", ",", "/", " - ", " – ", " — "])
+
+        if has_separator:
+            normalized = (
+                clean.replace(" & ", ",")
+                .replace("&", ",")
+                .replace("/", ",")
+                .replace(" - ", ",")
+                .replace(" – ", ",")
+                .replace(" — ", ",")
+            )
+
             parts = [p.strip() for p in normalized.split(",") if p.strip()]
 
             if len(parts) == 2:
@@ -146,18 +158,10 @@ def parse_team_pairs(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
                 skipped_lines.append(ln)
 
         else:
-            words = ln.split()
+            split_pair = split_name_line_without_separator(clean)
 
-            # Automatically split 4-word lines into two 2-word names.
-            # Example: Alfie Colombo Mark Slater
-            if len(words) == 4:
-                pairs.append((f"{words[0]} {words[1]}", f"{words[2]} {words[3]}"))
-
-            # Automatically split 2-word lines into two 1-word names.
-            # Example: Beddie John
-            elif len(words) == 2:
-                pairs.append((words[0], words[1]))
-
+            if split_pair:
+                pairs.append(split_pair)
             else:
                 skipped_lines.append(ln)
 
@@ -216,7 +220,6 @@ def generate_fixed_pair_round_robin(
     real_teams = [team for team in teams if team != "BYE"]
 
     for rr_round_games in round_groups:
-        # Split round-robin games into court-sized blocks.
         for i in range(0, len(rr_round_games), courts):
             block = rr_round_games[i:i + courts]
 
@@ -228,7 +231,6 @@ def generate_fixed_pair_round_robin(
                 active_teams.add(team_a)
                 active_teams.add(team_b)
 
-            # Fill unused courts.
             while len(cells) < courts + 1:
                 cells.append("")
 
@@ -250,9 +252,7 @@ def generate_schedule(
     rounds,
     max_opp_repeat,
     names,
-    partner_mode,
     court_names,
-    fixed_pairs=None,
     seed=None,
     time_budget_sec=4.0,
 ):
@@ -264,12 +264,6 @@ def generate_schedule(
     partner_pairs = [set() for _ in range(N)]
     rests_so_far = [0] * N
     last_rest_round = [-99] * N
-    schedule = []
-
-    if partner_mode == "fixed" and rest_per_round % 2 != 0:
-        raise ValueError("Fixed partner mode requires an even number of resting players each round.")
-
-    pairs = fixed_pairs or []
     base_order = list(range(N))
 
     def inc_opp(i, j):
@@ -295,28 +289,7 @@ def generate_schedule(
         scores.sort(reverse=True)
         return [i for _, i in scores[:rest_per_round]]
 
-    def choose_resting_pairs(r):
-        pair_scores = []
-        pair_rests = rest_per_round // 2
-
-        for a, b in pairs:
-            if rests_so_far[a] >= target_rests[a] or rests_so_far[b] >= target_rests[b]:
-                score = -1e9
-            elif r - last_rest_round[a] == 1 or r - last_rest_round[b] == 1:
-                score = -1e6
-            else:
-                need = (target_rests[a] - rests_so_far[a]) + (target_rests[b] - rests_so_far[b])
-                since = min(r - last_rest_round[a], r - last_rest_round[b])
-                score = need * 100 + since + random.random()
-
-            pair_scores.append((score, (a, b)))
-
-        pair_scores.sort(reverse=True)
-        chosen = [x for _, pair in pair_scores[:pair_rests] for x in pair]
-        return chosen
-
     def pair_players(avail):
-        # Build pairs trying to avoid repeat partners in rotate mode.
         result = []
         avail = avail.copy()
         random.shuffle(avail)
@@ -338,7 +311,6 @@ def generate_schedule(
         return result
 
     def courts_ok_with_cap(courts_round):
-        # Ensure adding this set of courts does not exceed max_opp_repeat for any matchup.
         for (a, b), (c, d) in courts_round:
             for x, y in [(a, c), (a, d), (b, c), (b, d)]:
                 if opponent_counts[x][y] + 1 > max_opp_repeat:
@@ -347,7 +319,6 @@ def generate_schedule(
         return True
 
     def group_into_courts_with_cap(pairs_for_round):
-        # Try many shuffles to find a grouping that respects the opponent cap.
         idxs = list(range(len(pairs_for_round)))
 
         for _ in range(1500):
@@ -387,14 +358,11 @@ def generate_schedule(
         success = True
 
         for r in range(rounds):
-            resting = choose_resting_pairs(r) if partner_mode == "fixed" else choose_resting(r)
+            resting = choose_resting(r)
             rest_set = set(resting)
             avail = [i for i in base_order if i not in rest_set]
 
-            if partner_mode == "fixed":
-                round_pairs = [p for p in pairs if p[0] in avail and p[1] in avail]
-            else:
-                round_pairs = pair_players(avail)
+            round_pairs = pair_players(avail)
 
             if not round_pairs or len(round_pairs) < courts * 2:
                 success = False
@@ -439,7 +407,7 @@ def generate_schedule(
 
 
 # ------------------------------------------------------------
-# PDF Builder — narrow Round, Resting treated like a court, adaptive paging
+# PDF Builder
 # ------------------------------------------------------------
 def _measure_width(texts: List[str], font: str, size: int, pad: float) -> float:
     widest = 0.0
@@ -464,17 +432,11 @@ def _group_cols_across_pages(
     page_width: float,
     margins: Tuple[float, float],
 ) -> List[List[str]]:
-    """
-    Pack game columns and Resting across pages alongside a fixed narrow Round column.
-    This supports custom court names such as Court 2, Court 4, North, South, etc.
-    """
     left_margin, right_margin = margins
     cols = list(df.columns)
 
     round_col = cols[0]
     resting_col = cols[-1]
-
-    # Everything between Round and Resting is treated as a court/game column.
     game_cols = cols[1:-1]
     var_cols = game_cols + [resting_col]
 
@@ -534,7 +496,6 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", pdf_size="Lar
     styles = getSampleStyleSheet()
     header_style = styles["Heading1"].clone("SchedHeader")
 
-    # Font sizing.
     if pdf_size == "X-Large":
         body_size = 18
         header_style.fontSize = 24
@@ -613,7 +574,6 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", pdf_size="Lar
 
             data.append(row_cells)
 
-        # Widths: Round narrow measured; others scaled.
         round_samples = [round_col] + [str(i) for i in range(1, min(100, len(df) + 1))]
         round_w = _measure_width(round_samples, body_font, body_size, pad=18)
 
@@ -702,12 +662,13 @@ with st.sidebar:
             placeholder=(
                 "Enter one pair per line, for example:\n"
                 "Beddie & John\n"
-                "Alex Smith Maria Jones\n"
+                "Tracy Thompson Dave Jones\n"
+                "Michele Van Grol Jeff Solway\n"
                 "Sam / Lee"
             ),
             help=(
-                "Enter one pair per line. You can use &, comma, slash, or four-word names. "
-                "Examples: Beddie & John, Beddie, John, or Alfie Colombo Mark Slater."
+                "Enter one pair per line. You can use &, comma, slash, dash, "
+                "or names without separators."
             ),
             height=180,
         )
@@ -769,6 +730,14 @@ if run:
                     + "; ".join(skipped_lines)
                 )
 
+            if team_pairs:
+                with st.expander("Parsed fixed teams"):
+                    parsed_df = pd.DataFrame(
+                        team_pairs,
+                        columns=["Player 1", "Player 2"],
+                    )
+                    st.dataframe(parsed_df, use_container_width=True, hide_index=True)
+
             if len(team_pairs) < 2:
                 result = None
                 st.error("Please enter at least two fixed pairs.")
@@ -784,9 +753,7 @@ if run:
                 rounds,
                 cap,
                 names,
-                "rotate",
                 court_names,
-                None,
                 seed_val,
             )
 
@@ -803,7 +770,6 @@ if run:
         st.success("✅ Schedule generated successfully!")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # Exports.
         csv_bytes = df.to_csv(index=False).encode("utf-8")
         pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", pdf_size=pdf_size)
 
