@@ -18,7 +18,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 # ------------------------------------------------------------
 # Streamlit page setup
 # ------------------------------------------------------------
-APP_VERSION = "fixed-pair parser v3"
+APP_VERSION = "court randomizer v4"
 
 st.set_page_config(
     page_title="Pickleball Schedule Generator",
@@ -29,7 +29,8 @@ st.set_page_config(
 st.title("🎾 Pickleball Schedule Generator")
 st.caption(
     f"Version: {APP_VERSION} — Rotate partners, fixed team pairs, named courts, "
-    "evenly spaced rests, capped repeat opponents, and printable large-font schedules."
+    "evenly spaced rests, capped repeat opponents, randomized court assignments, "
+    "and printable large-font schedules."
 )
 
 
@@ -182,6 +183,9 @@ def generate_fixed_pair_round_robin(
     Each pair stays together.
     Each pair plays every other pair once.
     Games are grouped into schedule rows based on number of courts.
+
+    Court assignment is randomized within each block of games, without changing
+    the matchups or round-robin rules.
     """
 
     if len(team_pairs) < 2:
@@ -222,6 +226,11 @@ def generate_fixed_pair_round_robin(
     for rr_round_games in round_groups:
         for i in range(0, len(rr_round_games), courts):
             block = rr_round_games[i:i + courts]
+
+            # Randomize only the court assignment within this block.
+            # This does not change opponents, partners, or who rests.
+            block = block.copy()
+            random.shuffle(block)
 
             active_teams = set()
             cells = [display_round]
@@ -373,6 +382,11 @@ def generate_schedule(
             if not courts_round:
                 success = False
                 break
+
+            # Randomize only which physical/named court each valid game appears on.
+            # This does not change partners, opponents, rests, or opponent caps.
+            courts_round = courts_round.copy()
+            random.shuffle(courts_round)
 
             schedule.append({"resting": resting, "courts": courts_round})
 
