@@ -83,7 +83,7 @@ def parse_fixed_pairs(N: int, names: List[str], text: str) -> List[Tuple[int, in
     return pairs
 
 
-def parse_team_pairs(text: str) -> List[Tuple[str, str]]:
+def parse_team_pairs(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
     """
     Parses fixed team pairs entered one per line.
 
@@ -91,18 +91,44 @@ def parse_team_pairs(text: str) -> List[Tuple[str, str]]:
     Beddie & John
     Beddie, John
     Beddie / John
+    Alfie Colombo Mark Slater
+
+    For four-word lines with no separator, it assumes:
+    Firstname Lastname Firstname Lastname
+    Example:
+    Alfie Colombo Mark Slater -> Alfie Colombo & Mark Slater
     """
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     pairs = []
+    skipped_lines = []
 
     for ln in lines:
-        normalized = ln.replace("&", ",").replace("/", ",")
-        parts = [p.strip() for p in normalized.split(",") if p.strip()]
+        if "&" in ln or "," in ln or "/" in ln:
+            normalized = ln.replace("&", ",").replace("/", ",")
+            parts = [p.strip() for p in normalized.split(",") if p.strip()]
 
-        if len(parts) == 2:
-            pairs.append((parts[0], parts[1]))
+            if len(parts) == 2:
+                pairs.append((parts[0], parts[1]))
+            else:
+                skipped_lines.append(ln)
 
-    return pairs
+        else:
+            words = ln.split()
+
+            # Automatically split 4-word lines into two 2-word names.
+            # Example: Alfie Colombo Mark Slater
+            if len(words) == 4:
+                pairs.append((f"{words[0]} {words[1]}", f"{words[2]} {words[3]}"))
+
+            # Automatically split 2-word lines into two 1-word names.
+            # Example: Beddie John
+            elif len(words) == 2:
+                pairs.append((words[0], words[1]))
+
+            else:
+                skipped_lines.append(ln)
+
+    return pairs, skipped_lines
 
 
 # ------------------------------------------------------------
@@ -621,15 +647,25 @@ with st.sidebar:
 
     if fixed_mode:
         with col1:
-            courts = st.number_input("Courts", min_value=1, max_value=25, value=2, step=1)
+            courts = st.number_input("Courts", min_value=1, max_value=25, value=3, step=1)
 
         with col2:
             pdf_size = st.radio("PDF Font Size", ["Large", "X-Large"], index=0)
 
         pairs_text = st.text_area(
             "Fixed Team Pairs",
-            value="Beddie & John\nAlex & Maria\nSam & Lee\nPat & Chris",
-            help="Enter one pair per line. Example: Beddie & John",
+            value=(
+                "Tracy Thompson & Dave Jones\n"
+                "Maureen MacLean & Peter MacLean\n"
+                "Michele Van Grol & Jeff Solway\n"
+                "Annie Allard & Bill Jenkins\n"
+                "Elma Melhus & Bryan Melhus\n"
+                "Alfie Colombo Mark Slater"
+            ),
+            help=(
+                "Enter one pair per line. You can use &, comma, slash, or four-word names. "
+                "Examples: Beddie & John, Beddie, John, or Alfie Colombo Mark Slater."
+            ),
             height=180,
         )
 
@@ -673,7 +709,13 @@ with st.sidebar:
 if run:
     try:
         if fixed_mode:
-            team_pairs = parse_team_pairs(pairs_text)
+            team_pairs, skipped_lines = parse_team_pairs(pairs_text)
+
+            if skipped_lines:
+                st.warning(
+                    "Some lines could not be read as pairs and were skipped: "
+                    + "; ".join(skipped_lines)
+                )
 
             if len(team_pairs) < 2:
                 result = None
