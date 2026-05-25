@@ -1201,6 +1201,18 @@ with st.sidebar:
 # ------------------------------------------------------------
 # Main Output
 # ------------------------------------------------------------
+if "schedule_df" not in st.session_state:
+    st.session_state.schedule_df = None
+
+if "last_blocking_errors" not in st.session_state:
+    st.session_state.last_blocking_errors = []
+
+if "last_advisory_notes" not in st.session_state:
+    st.session_state.last_advisory_notes = []
+
+if "last_schedule_mode" not in st.session_state:
+    st.session_state.last_schedule_mode = None
+
 if run:
     try:
         result = None
@@ -1253,6 +1265,10 @@ if run:
         blocking_errors = [str(e)]
         advisory_notes = []
 
+    st.session_state.last_blocking_errors = blocking_errors
+    st.session_state.last_advisory_notes = advisory_notes
+    st.session_state.last_schedule_mode = partner_mode
+
     if not result:
         st.error("Could not generate a valid schedule.")
 
@@ -1271,52 +1287,72 @@ if run:
                 "Try adjusting the number of players, courts, rounds, or opponent repeat limit."
             )
 
+        if st.session_state.schedule_df is not None:
+            st.info(
+                "Your previously generated schedule is still saved below. "
+                "You can still print score cards for that saved schedule."
+            )
+
     else:
         columns, rows = result
-        df = pd.DataFrame(rows, columns=columns)
+        st.session_state.schedule_df = pd.DataFrame(rows, columns=columns)
+        st.success("✅ Schedule generated and saved. Review it below before printing score cards.")
 
-        st.success("✅ Schedule generated successfully!")
 
-        if advisory_notes:
-            with st.expander("Schedule notes"):
-                for msg in advisory_notes:
-                    st.info(msg)
+if st.session_state.schedule_df is not None:
+    df = st.session_state.schedule_df
 
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", pdf_size=pdf_size)
-        score_card_pdf_bytes = build_score_cards_pdf(
-            df,
-            title=score_card_title,
-            points_to=score_card_points,
+    if not run:
+        st.info(
+            "Showing the last generated schedule. It will not change unless you click "
+            "Generate Schedule again."
         )
 
-        c1, c2, c3 = st.columns(3)
+    advisory_notes = st.session_state.last_advisory_notes
 
-        with c1:
-            st.download_button(
-                "Download CSV",
-                data=csv_bytes,
-                file_name="pickleball_schedule.csv",
-                mime="text/csv",
-            )
+    if advisory_notes:
+        with st.expander("Schedule notes"):
+            for msg in advisory_notes:
+                st.info(msg)
 
-        with c2:
-            st.download_button(
-                "Get Print Version PDF",
-                data=pdf_bytes,
-                file_name="pickleball_schedule_print.pdf",
-                mime="application/pdf",
-            )
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
-        with c3:
-            st.download_button(
-                "Get Score Cards PDF",
-                data=score_card_pdf_bytes,
-                file_name="pickleball_score_cards.pdf",
-                mime="application/pdf",
-            )
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", pdf_size=pdf_size)
+    score_card_pdf_bytes = build_score_cards_pdf(
+        df,
+        title=score_card_title,
+        points_to=score_card_points,
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.download_button(
+            "Download CSV",
+            data=csv_bytes,
+            file_name="pickleball_schedule.csv",
+            mime="text/csv",
+            key="download_csv_saved_schedule",
+        )
+
+    with c2:
+        st.download_button(
+            "Get Print Version PDF",
+            data=pdf_bytes,
+            file_name="pickleball_schedule_print.pdf",
+            mime="application/pdf",
+            key="download_print_pdf_saved_schedule",
+        )
+
+    with c3:
+        st.download_button(
+            "Get Score Cards PDF",
+            data=score_card_pdf_bytes,
+            file_name="pickleball_score_cards.pdf",
+            mime="application/pdf",
+            key="download_score_cards_saved_schedule",
+        )
 
 else:
     st.info("Set your event details in the sidebar and click **Generate Schedule**.")
