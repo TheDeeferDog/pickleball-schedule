@@ -14,12 +14,13 @@ from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfgen import canvas as pdf_canvas
 
 
 # ------------------------------------------------------------
 # Streamlit page setup
 # ------------------------------------------------------------
-APP_VERSION = "balanced court assignment v6 - diagnostics"
+APP_VERSION = "balanced court assignment v7 - score cards"
 
 st.set_page_config(
     page_title="Pickleball Schedule Generator",
@@ -31,7 +32,8 @@ st.title("🎾 Pickleball Schedule Generator")
 st.caption(
     f"Version: {APP_VERSION} — Rotate partners, fixed team pairs, named courts, "
     "evenly spaced rests, capped repeat opponents, balanced court assignments, "
-    "printable large-font schedules, and helpful failure diagnostics."
+    "printable large-font schedules, helpful failure diagnostics, "
+    "and printable individual game score cards."
 )
 
 
@@ -887,6 +889,203 @@ def build_print_pdf(df: pd.DataFrame, title="Pickleball Schedule", pdf_size="Lar
 
 
 # ------------------------------------------------------------
+# Score Card PDF Builder
+# ------------------------------------------------------------
+def split_game_cell(game_text: str) -> Optional[Tuple[str, str]]:
+    """
+    Splits a schedule cell into Team 1 and Team 2.
+
+    Expected schedule format:
+    Team 1 V Team 2
+    """
+    if game_text is None:
+        return None
+
+    text = str(game_text).strip()
+
+    if not text or text.lower() == "nan":
+        return None
+
+    separators = [" V ", " v ", " vs ", " VS ", " Vs ", " versus "]
+
+    for sep in separators:
+        if sep in text:
+            parts = text.split(sep, 1)
+            team_1 = parts[0].strip()
+            team_2 = parts[1].strip()
+
+            if team_1 and team_2:
+                return team_1, team_2
+
+    return None
+
+
+def short_court_label(court_name: str) -> str:
+    """
+    Converts Court 1 -> 1 for the score card header.
+    Leaves custom names like Kitchen Court unchanged.
+    """
+    label = str(court_name).strip()
+
+    if label.lower().startswith("court "):
+        return label[6:].strip()
+
+    return label
+
+
+def collect_score_card_games(df: pd.DataFrame) -> List[dict]:
+    """
+    Converts the generated schedule DataFrame into one score-card record per game.
+    Works for both rotating-partner mode and fixed-pair mode.
+    """
+    games = []
+    skip_columns = {"round", "time", "resting"}
+    court_columns = [c for c in df.columns if str(c).strip().lower() not in skip_columns]
+
+    for _, row in df.iterrows():
+        round_number = row.get("Round", "")
+
+        for court_column in court_columns:
+            parsed = split_game_cell(row.get(court_column, ""))
+
+            if not parsed:
+                continue
+
+            team_1, team_2 = parsed
+            games.append(
+                {
+                    "round": round_number,
+                    "court": short_court_label(court_column),
+                    "team_1": team_1,
+                    "team_2": team_2,
+                }
+            )
+
+    return games
+
+
+def draw_score_boxes(c, x: float, y: float, points_to: int, box_size: float = 34):
+    """
+    Draws numbered score boxes from 1 through points_to.
+    """
+    for i in range(points_to):
+        c.rect(x + i * box_size, y, box_size, box_size, stroke=1, fill=0)
+        c.setFont("Helvetica", 14)
+        c.drawCentredString(x + i * box_size + box_size / 2, y + 11, str(i + 1))
+
+
+def fit_text(c, text: str, max_width: float, font_name: str = "Helvetica", max_size: int = 14, min_size: int = 8) -> int:
+    """
+    Returns a font size that allows text to fit in max_width.
+    """
+    text = "" if text is None else str(text)
+
+    for size in range(max_size, min_size - 1, -1):
+        if stringWidth(text, font_name, size) <= max_width:
+            return size
+
+    return min_size
+
+
+def draw_single_score_card(
+    c,
+    card: dict,
+    title: str,
+    y_top: float,
+    points_to: int,
+):
+    """
+    Draws one score card in a half-page vertical slot.
+    Two calls are made per letter-size page.
+    """
+    left = 44
+    right = 568
+    center_x = 306
+
+    title = title or "Scramble Session"
+
+    c.setFont("Helvetica-Bold", 24)
+    c.drawString(left, y_top - 26, title)
+
+    c.setFont("Helvetica", 14)
+    c.drawString(left, y_top - 66, f"Round:{card['round']}")
+    c.drawString(left + 118, y_top - 66, f"Court: {card['court']}")
+
+    c.setFont("Helvetica", 14)
+    c.drawString(left, y_top - 96, "Team 1:")
+
+    team_name_x = left + 118
+    team_name_width = right - team_name_x
+    team_1_size = fit_text(c, card["team_1"], team_name_width, max_size=14, min_size=8)
+    c.setFont("Helvetica", team_1_size)
+    c.drawString(team_name_x, y_top - 96, card["team_1"])
+
+    box_size = min(34, 410 / max(points_to, 1))
+    boxes_width = box_size * points_to
+    boxes_x = center_x - boxes_width / 2
+
+    draw_score_boxes(c, boxes_x, y_top - 166, points_to, box_size=box_size)
+
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(center_x - 86, y_top - 222, "Initials Team 1 ________")
+    c.drawCentredString(center_x + 116, y_top - 222, "Initials Team 2 ________")
+
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(center_x, y_top - 252, "Please circle winning team.")
+
+    draw_score_boxes(c, boxes_x, y_top - 314, points_to, box_size=box_size)
+
+    c.setFont("Helvetica", 14)
+    c.drawString(left, y_top - 352, "Team 2:")
+
+    team_2_size = fit_text(c, card["team_2"], team_name_width, max_size=14, min_size=8)
+    c.setFont("Helvetica", team_2_size)
+    c.drawString(team_name_x, y_top - 352, card["team_2"])
+
+
+def build_score_cards_pdf(
+    df: pd.DataFrame,
+    title: str = "Scramble Session 1",
+    points_to: int = 11,
+) -> bytes:
+    """
+    Builds a printable PDF with two individual game score cards per letter-size page.
+    Player names are filled directly from the generated schedule.
+    """
+    buffer = BytesIO()
+    c = pdf_canvas.Canvas(buffer, pagesize=letter)
+    page_width, page_height = letter
+
+    games = collect_score_card_games(df)
+
+    if not games:
+        c.setFont("Helvetica", 16)
+        c.drawCentredString(page_width / 2, page_height / 2, "No games available for score cards.")
+        c.save()
+        buffer.seek(0)
+        return buffer.getvalue()
+
+    y_tops = [page_height - 36, page_height / 2 - 10]
+
+    for index, card in enumerate(games):
+        if index > 0 and index % 2 == 0:
+            c.showPage()
+
+        slot = index % 2
+        draw_single_score_card(
+            c=c,
+            card=card,
+            title=title,
+            y_top=y_tops[slot],
+            points_to=points_to,
+        )
+
+    c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+# ------------------------------------------------------------
 # Sidebar Inputs
 # ------------------------------------------------------------
 with st.sidebar:
@@ -977,6 +1176,24 @@ with st.sidebar:
 
         names_text = st.text_area("Player Names, optional, one per line", height=120)
         pairs_text = ""
+
+    st.divider()
+    st.subheader("Score Cards")
+
+    score_card_title = st.text_input(
+        "Score Card Title",
+        value="Scramble Session 1",
+        help="This title will print at the top of every individual game score card.",
+    )
+
+    score_card_points = st.number_input(
+        "Score Card Points",
+        min_value=1,
+        max_value=30,
+        value=11,
+        step=1,
+        help="The score boxes will print from 1 through this number.",
+    )
 
     run = st.button("Generate Schedule", type="primary")
 
@@ -1069,8 +1286,13 @@ if run:
 
         csv_bytes = df.to_csv(index=False).encode("utf-8")
         pdf_bytes = build_print_pdf(df, title="Pickleball Schedule", pdf_size=pdf_size)
+        score_card_pdf_bytes = build_score_cards_pdf(
+            df,
+            title=score_card_title,
+            points_to=score_card_points,
+        )
 
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
 
         with c1:
             st.download_button(
@@ -1085,6 +1307,14 @@ if run:
                 "Get Print Version PDF",
                 data=pdf_bytes,
                 file_name="pickleball_schedule_print.pdf",
+                mime="application/pdf",
+            )
+
+        with c3:
+            st.download_button(
+                "Get Score Cards PDF",
+                data=score_card_pdf_bytes,
+                file_name="pickleball_score_cards.pdf",
                 mime="application/pdf",
             )
 
