@@ -19,7 +19,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 # ------------------------------------------------------------
 # Streamlit page setup
 # ------------------------------------------------------------
-APP_VERSION = "balanced court assignment v5"
+APP_VERSION = "balanced court assignment v6 - diagnostics"
 
 st.set_page_config(
     page_title="Pickleball Schedule Generator",
@@ -31,7 +31,7 @@ st.title("🎾 Pickleball Schedule Generator")
 st.caption(
     f"Version: {APP_VERSION} — Rotate partners, fixed team pairs, named courts, "
     "evenly spaced rests, capped repeat opponents, balanced court assignments, "
-    "and printable large-font schedules."
+    "printable large-font schedules, and helpful failure diagnostics."
 )
 
 
@@ -45,6 +45,104 @@ def compute_target_rests(N: int, rounds: int, courts: int):
     base = total_rests // N
     extra = total_rests % N
     return [base + (1 if i < extra else 0) for i in range(N)], rest_per_round
+
+
+def diagnose_schedule_inputs(
+    N: int,
+    courts: int,
+    rounds: int,
+    max_opp_repeat: int,
+) -> Tuple[List[str], List[str]]:
+    """
+    Returns two lists:
+    - blocking_errors: problems that make generation definitely impossible
+    - advisory_notes: warnings or explanations that may help if generation fails
+
+    These diagnostics do not replace the generator. They explain the most
+    common failure causes before or after generation is attempted.
+    """
+    blocking_errors = []
+    advisory_notes = []
+
+    on_court = courts * 4
+
+    if N < 4:
+        blocking_errors.append(
+            "You need at least 4 players for one doubles game."
+        )
+
+    if courts < 1:
+        blocking_errors.append(
+            "You need at least 1 court."
+        )
+
+    if rounds < 1:
+        blocking_errors.append(
+            "You need at least 1 round."
+        )
+
+    if N < on_court:
+        blocking_errors.append(
+            f"You selected {courts} court(s), which requires {on_court} players "
+            f"per round, but only {N} player(s) are available. Reduce courts or add players."
+        )
+
+    if N <= 0:
+        return blocking_errors, advisory_notes
+
+    target_rests, rest_per_round = compute_target_rests(N, rounds, courts)
+
+    if N == on_court and rounds > 1:
+        advisory_notes.append(
+            "Everyone plays every round, so there are no rests to rotate. "
+            "That is allowed, but repeated opponents may become harder to avoid."
+        )
+
+    # Partner uniqueness check.
+    # The current rotating-partner generator avoids repeat partners completely.
+    # Each player can have at most N - 1 unique partners.
+    if target_rests:
+        max_games_for_any_player = rounds - min(target_rests)
+
+        if max_games_for_any_player > N - 1:
+            advisory_notes.append(
+                f"Some players may need to play {max_games_for_any_player} games, "
+                f"but each player only has {N - 1} possible unique partners. "
+                "Because this generator avoids repeat partners, this setup may be impossible. "
+                "Try fewer rounds, more players, or add a future setting that allows repeat partners."
+            )
+
+    # Opponent cap feasibility estimate.
+    # In each doubles game, every player faces 2 opponents.
+    # Across all games, total directed player-opponent exposures = active player slots * 2.
+    total_active_slots = rounds * courts * 4
+    total_opponent_exposures = total_active_slots * 2
+
+    # Each unordered player pair can appear as opponents up to max_opp_repeat times.
+    # Since total_opponent_exposures is directed, multiply unordered capacity by 2.
+    max_opponent_capacity = (N * (N - 1) // 2) * max_opp_repeat * 2
+
+    if max_opponent_capacity > 0 and total_opponent_exposures > max_opponent_capacity:
+        advisory_notes.append(
+            f"The opponent cap may be too strict. With {N} players, {rounds} rounds, "
+            f"and {courts} court(s), the schedule needs about "
+            f"{total_opponent_exposures} player-opponent exposures, but the selected "
+            f"cap allows about {max_opponent_capacity}. "
+            "Try increasing 'Max vs Any Opponent' or reducing rounds."
+        )
+
+    # Rest fairness note.
+    if rest_per_round > 0:
+        total_rests = rest_per_round * rounds
+
+        if total_rests < N:
+            advisory_notes.append(
+                f"Only {total_rests} total rest slot(s) exist across the schedule, "
+                f"but there are {N} players. Some players will not rest, which is expected "
+                "for this setup."
+            )
+
+    return blocking_errors, advisory_notes
 
 
 def parse_player_names(count: int, text: str) -> List[str]:
@@ -519,6 +617,60 @@ def generate_schedule(
     return columns, rows
 
 
+def generate_schedule_with_diagnostics(
+    N,
+    courts,
+    rounds,
+    max_opp_repeat,
+    names,
+    court_names,
+    seed=None,
+    time_budget_sec=4.0,
+):
+    """
+    Runs input diagnostics, then attempts rotating-partner schedule generation.
+
+    Returns:
+        result: schedule result or None
+        blocking_errors: list of errors that make generation impossible
+        advisory_notes: list of helpful notes or likely failure causes
+    """
+    blocking_errors, advisory_notes = diagnose_schedule_inputs(
+        N=N,
+        courts=courts,
+        rounds=rounds,
+        max_opp_repeat=max_opp_repeat,
+    )
+
+    if blocking_errors:
+        return None, blocking_errors, advisory_notes
+
+    result = generate_schedule(
+        N=N,
+        courts=courts,
+        rounds=rounds,
+        max_opp_repeat=max_opp_repeat,
+        names=names,
+        court_names=court_names,
+        seed=seed,
+        time_budget_sec=time_budget_sec,
+    )
+
+    if result is None:
+        advisory_notes.append(
+            "The generator could not find a valid schedule within the search time. "
+            "This usually means the constraints are too tight for the selected players, "
+            "courts, and rounds."
+        )
+
+        advisory_notes.append(
+            "Most likely fixes: increase 'Max vs Any Opponent', reduce the number of rounds, "
+            "reduce the number of courts, add more players, or try a different Specific Schedule Number."
+        )
+
+    return result, blocking_errors, advisory_notes
+
+
 # ------------------------------------------------------------
 # PDF Builder
 # ------------------------------------------------------------
@@ -834,6 +986,10 @@ with st.sidebar:
 # ------------------------------------------------------------
 if run:
     try:
+        result = None
+        blocking_errors = []
+        advisory_notes = []
+
         if fixed_mode:
             team_pairs, skipped_lines = parse_team_pairs(pairs_text)
 
@@ -853,34 +1009,62 @@ if run:
 
             if len(team_pairs) < 2:
                 result = None
-                st.error("Please enter at least two fixed pairs.")
+                blocking_errors.append("Please enter at least two fixed pairs.")
             else:
                 result = generate_fixed_pair_round_robin(team_pairs, courts, court_names)
+
+                if result is None:
+                    advisory_notes.append(
+                        "The fixed-pair round robin could not be generated. Check that at least two valid pairs were entered."
+                    )
 
         else:
             names = parse_player_names(players, names_text)
 
-            result = generate_schedule(
-                players,
-                courts,
-                rounds,
-                cap,
-                names,
-                court_names,
-                seed_val,
+            result, blocking_errors, advisory_notes = generate_schedule_with_diagnostics(
+                N=players,
+                courts=courts,
+                rounds=rounds,
+                max_opp_repeat=cap,
+                names=names,
+                court_names=court_names,
+                seed=seed_val,
             )
 
     except ValueError as e:
         result = None
-        st.error(str(e))
+        blocking_errors = [str(e)]
+        advisory_notes = []
 
     if not result:
-        st.error("Could not generate a valid schedule. Try adjusting numbers or loosening constraints.")
+        st.error("Could not generate a valid schedule.")
+
+        if blocking_errors:
+            st.subheader("What needs to be fixed")
+            for msg in blocking_errors:
+                st.error(msg)
+
+        if advisory_notes:
+            st.subheader("Why this may have failed")
+            for msg in advisory_notes:
+                st.warning(msg)
+
+        if not blocking_errors and not advisory_notes:
+            st.warning(
+                "Try adjusting the number of players, courts, rounds, or opponent repeat limit."
+            )
+
     else:
         columns, rows = result
         df = pd.DataFrame(rows, columns=columns)
 
         st.success("✅ Schedule generated successfully!")
+
+        if advisory_notes:
+            with st.expander("Schedule notes"):
+                for msg in advisory_notes:
+                    st.info(msg)
+
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         csv_bytes = df.to_csv(index=False).encode("utf-8")
